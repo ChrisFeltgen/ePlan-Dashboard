@@ -37,7 +37,6 @@
        category colors. */
     --series-pending:  #2a78d6; /* categorical slot 1 - blue */
     --series-accepted: #1baf7a; /* categorical slot 3 - aqua */
-    --success-text:    #006300;
     --status-critical: #d03b3b; /* reserved status color - overdue flag, never a category */
     --status-warning:  #a15c00; /* reserved status color - due today/soon flag */
     /* City of Pompano Beach brand colors, confirmed live from
@@ -62,7 +61,6 @@
       --border:          rgba(255,255,255,0.10);
       --series-pending:  #3987e5;
       --series-accepted: #199e70;
-      --success-text:    #0ca30c;
       --status-critical: #e66767;
       --status-warning:  #d99a3d;
       --brand-primary:       #4a94ab;
@@ -83,7 +81,6 @@
     --border:          rgba(255,255,255,0.10);
     --series-pending:  #3987e5;
     --series-accepted: #199e70;
-    --success-text:    #0ca30c;
     --status-critical: #e66767;
     --status-warning:  #d99a3d;
     --brand-primary:       #4a94ab;
@@ -139,12 +136,9 @@
   .refresh-btn:disabled { opacity: 0.6; cursor: default; }
   .refresh-btn.error { background: #d03b3b; border-color: #d03b3b; }
   /* No color override here - #refreshStatus already has class="meta" and
-     sits inside the always-teal header band, so it should use the same
-     near-white color as the rest of the header text (`header .meta` below)
-     regardless of light/dark mode. It previously pinned to --text-muted,
-     a theme color meant for body text on the page's own surface - in dark
-     mode that's a muted gray-brown with poor contrast against the teal
-     header, which is what made it "look poor in dark mode". */
+     sits inside the always-teal header band, so it uses the same near-white
+     color as the rest of the header text (`header .meta` below) in both
+     themes. */
   /* One color, no light/dark split - the header band itself is always the
      same teal regardless of site theme, so what needs good contrast here is
      "bright green on teal," which doesn't change between modes. */
@@ -176,7 +170,7 @@
     gap: 12px; margin: 16px 0 24px;
   }
   .stat-tile {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
     background: var(--surface-1); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 16px; box-shadow: var(--card-shadow);
   }
@@ -189,59 +183,64 @@
     width: 40px; height: 40px; border-radius: 50%;
   }
   .stat-icon svg { width: 20px; height: 20px; }
-  .stat-icon.neutral { background: var(--page-plane); color: var(--brand-primary); }
-  .stat-icon.pending { background: #2a78d61a; color: var(--series-pending); }
-  .stat-icon.accepted { background: #1baf7a1a; color: var(--series-accepted); }
-  .stat-icon.overdue { background: #d03b3b1a; color: var(--status-critical); }
-  .stat-text { min-width: 0; }
-  .stat-label { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 4px; }
-  .stat-value { font-size: 28px; font-weight: 600; line-height: 1.1; }
+  .stat-icon.neutral { background: color-mix(in srgb, var(--series-pending) 16%, transparent); color: var(--series-pending); }
+  .stat-icon.pending { background: color-mix(in srgb, var(--series-pending) 12%, transparent); color: var(--series-pending); }
+  .stat-icon.accepted { background: color-mix(in srgb, var(--series-accepted) 16%, transparent); color: var(--series-accepted); }
+  .stat-icon.overdue { background: color-mix(in srgb, var(--status-critical) 14%, transparent); color: var(--status-critical); }
+  .stat-icon.done { background: var(--page-plane); color: var(--text-muted); }
+  .stat-text { min-width: 0; text-align: center; }
+  .stat-label { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+  .stat-value { font-size: 30px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-value.neutral, .stat-value.done { color: var(--text-primary); }
   .stat-value.pending { color: var(--series-pending); }
   .stat-value.accepted { color: var(--series-accepted); }
   .stat-value.overdue { color: #d03b3b; }
   @media (prefers-color-scheme: dark) { .stat-value.overdue { color: #e66767; } }
+  /* Tile surfaces: "Open tasks" is the headline (blue-tinted with a blue
+     outline); In progress / Overdue carry a faint wash of their own hue;
+     Pending and Completed today stay plain. */
+  .stat-tile.neutral { background: color-mix(in srgb, var(--series-pending) 8%, var(--surface-1)); border-color: color-mix(in srgb, var(--series-pending) 45%, var(--border)); }
+  .stat-tile.accepted { background: color-mix(in srgb, var(--series-accepted) 7%, var(--surface-1)); }
+  .stat-tile.overdue { background: color-mix(in srgb, var(--status-critical) 7%, var(--surface-1)); }
 
-  /* No card of its own - this now lives inside .task-workload-panel, which
-     already provides the surface/border/shadow, so a second nested card here
-     would just be card-within-card clutter. A bottom rule is enough to mark
-     where the controls end and the workflow list they govern begins. */
-  .controls {
-    display: flex; flex-direction: column; gap: 10px;
-    margin-bottom: 14px; padding-bottom: 14px;
-    border-bottom: 1px solid var(--gridline);
+  /* Two tinted bands inside .task-workload-panel: filters on top, then the
+     Task state / Sort by / View button groups. Each control has a small
+     uppercase label ABOVE it (rather than inline "Tasks:" text) so the bands
+     read as a form, with hairline dividers between groups. */
+  .controls { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .controls-panel {
+    display: flex; flex-wrap: wrap; gap: 12px 0; align-items: flex-end;
+    padding: 12px 16px; background: var(--page-plane); border: 1px solid var(--gridline); border-radius: 10px;
   }
-  .controls-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
-  /* A light rule between the filter row and the toggle row, and each toggle
-     group gets its own left divider (skipping the first) - three separate
-     button groups (Tasks/Sort/View) sitting edge to edge with only 16px of
-     gap read as one crowded cluster; a hairline between them makes each
-     group's boundary obvious without needing more space. */
-  .controls-row-toggles { padding-top: 10px; border-top: 1px solid var(--gridline); }
-  .controls-row-toggles .sort-toggle { padding-left: 16px; border-left: 1px solid var(--gridline); }
-  .controls-row-toggles .sort-toggle:first-child { padding-left: 0; border-left: none; }
-  /* The dividers and right-push only make sense on one wide row; once
-     narrow screens wrap each group onto its own line (below), a divider
-     hanging at the start of a wrapped line and a large gap shoving the last
-     group away from the others both look like layout mistakes rather than
-     grouping. */
-  @media (max-width: 900px) {
-    .controls-row-toggles .sort-toggle { padding-left: 0; border-left: none; }
-    .controls-row-toggles .controls-push-right { margin-left: 0; }
-  }
-  .controls input[type="search"] {
-    flex: 1 1 200px; min-width: 160px; padding: 7px 10px; font-size: 14px;
+  .control-group { display: flex; flex-direction: column; gap: 6px; padding: 0 16px; border-left: 1px solid var(--gridline); }
+  .control-group:first-child { padding-left: 0; border-left: none; }
+  .control-group:last-child { padding-right: 0; }
+  .control-grow { flex: 1 1 220px; min-width: 0; }
+  .control-check { justify-content: flex-end; flex: 0 0 auto; align-self: stretch; }
+  .control-label { font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+  .check-label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; white-space: nowrap; height: 36px; cursor: pointer; }
+  .search-field { position: relative; }
+  .search-field .search-icon { position: absolute; left: 10px; top: 50%; width: 15px; height: 15px; margin-top: -7.5px; color: var(--text-muted); pointer-events: none; }
+  .search-field input[type="search"] {
+    width: 100%; box-sizing: border-box; height: 36px; padding: 7px 10px 7px 32px; font-size: 14px;
     border: 1px solid var(--border); border-radius: 6px;
-    background: var(--page-plane); color: var(--text-primary);
+    background: var(--surface-1); color: var(--text-primary);
   }
-  .controls label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .view-toggle { display: flex; gap: 4px; align-items: center; }
   .view-toggle button {
     font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--page-plane); color: var(--text-secondary); cursor: pointer;
   }
   .view-toggle button.active { background: var(--brand-primary); color: #fff; border-color: var(--brand-primary); }
+  .controls-panel .view-toggle { flex-wrap: wrap; }
+  .controls-panel .view-toggle button { height: 36px; padding: 0 14px; background: var(--surface-1); }
+  .controls-panel .view-toggle button.active { background: var(--brand-primary); }
   .controls-push-right { margin-left: auto; }
-  .sort-toggle-label { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+  @media (max-width: 900px) {
+    .control-group { padding: 0; border-left: none; }
+    .control-grow { flex: 1 1 100%; }
+    .controls-push-right { margin-left: 0; }
+  }
 
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -275,13 +274,10 @@
      own, which is what made a page of several workflows read as a stack of
      duplicate cards instead of one workload area. */
   /* 8px horizontal padding, not 0 - .group-block/.group-col-header below use
-     a -8px negative margin (so their hover background can bleed toward this
-     section's edge without a gap), and this section has no padding of its
-     own to absorb that anymore now that it's a subsection instead of an
-     independent card. Without it, -8px reached 8px past this element's own
-     box; with overflow-x:auto still in place from the old per-card design,
-     that turned into an actual (empty, useless) horizontal scrollbar on
-     every workflow section rather than the harmless bleed it used to be. */
+     a -8px negative margin (so their hover background bleeds toward this
+     section's edge without a gap), and this padding absorbs it so nothing
+     reaches past the section's own box (which would add a horizontal
+     scrollbar). */
   .template-section {
     padding: 16px 8px 4px;
   }
@@ -297,7 +293,7 @@
      padding is set here, so 24px nets a visible 16px indent rather than
      landing back at the un-indented baseline. Right side is untouched (0)
      so that edge stays exactly where .template-section's own padding
-     already puts it - safe from the horizontal-scrollbar bug fixed above. */
+     already puts it. */
   .template-groups { padding-left: 24px; }
   @media (max-width: 900px) { .template-groups { padding-left: 16px; } }
   .template-sub { font-size: 12.5px; color: var(--text-muted); font-weight: 400; margin-left: 8px; }
@@ -321,12 +317,11 @@
   .completed-check-icon {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     width: 32px; height: 32px; border-radius: 50%;
-    background: #1baf7a1a; color: var(--series-accepted);
+    background: var(--series-accepted); color: #fff;
   }
   .completed-check-icon svg { width: 18px; height: 18px; }
   .completed-panel-title { font-size: 19px; font-weight: 700; margin: 0; }
   .completed-panel-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
-  .completed-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
   .completed-panel-body { margin-top: 10px; }
 
   /* Chevron leads the row (not a decorative icon box) - it's the actual
@@ -348,13 +343,10 @@
      done"), so it gets its own visual weight instead of trailing off as
      muted text the way a secondary annotation would. */
   .completed-workflow-count { font-weight: 700; color: var(--series-accepted); font-size: 13.5px; margin-left: 8px; }
-  /* No progress bar here anymore (dropped after it proved fragile - a flex
-     item's default min/flex-shrink behavior around variable-length text
-     resolves slightly differently per browser, so the same row rendered a
-     different bar width in Firefox vs Chrome depending on that row's own
-     workflow-name length). The legend alone doesn't have that problem - it
-     just sizes to its own content and sits flush right, since name-wrap
-     above absorbs all the slack space. */
+  /* The legend sizes to its own content and sits flush right; name-wrap
+     above absorbs the slack. (There is deliberately no progress bar in this
+     row - a flex-sized bar rendered at different widths in Firefox and
+     Chrome.) */
   .completed-workflow-legend { display: flex; flex: 0 0 auto; gap: 10px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
   .completed-workflow-legend .legend-item { display: flex; align-items: center; gap: 5px; }
   .completed-workflow-legend b { font-variant-numeric: tabular-nums; color: var(--text-primary); }
@@ -368,21 +360,30 @@
      border sitting narrower than the row it's attached to. */
   .completed-detail { padding: 12px 12px 14px; border: 1px solid var(--border); border-top: none; border-radius: 0 0 6px 6px; margin: 0 -8px 4px; }
   .completed-bucket { margin-bottom: 16px; }
+  .completed-bucket-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; font-size: 13px; font-weight: 700; }
+  .completed-bucket-head.review { background: color-mix(in srgb, var(--series-accepted) 13%, transparent); }
+  .completed-bucket-head.ops { background: color-mix(in srgb, var(--series-pending) 13%, transparent); }
+  .completed-bucket-icon { display: flex; }
+  .completed-bucket-icon svg { width: 15px; height: 15px; }
+  .completed-bucket-head.review .completed-bucket-icon, .completed-bucket-head.review .completed-bucket-total { color: var(--series-accepted); }
+  .completed-bucket-head.ops .completed-bucket-icon, .completed-bucket-head.ops .completed-bucket-total { color: var(--series-pending); }
+  .completed-bucket-total { margin-left: auto; }
+  .completed-grid-head { display: contents; }
+  .completed-grid-head > div { font-size: 11.5px; font-weight: 600; color: var(--text-muted); padding-bottom: 2px; }
   .completed-bucket:last-child { margin-bottom: 0; }
   .completed-detail-col-title {
     font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
     color: var(--text-muted); margin: 0 0 6px;
   }
-  /* One row per group: its own bar/count on the left, its own reviewers
-     inline on the right - no separate aggregate "who worked today" pool and
-     no click-to-reveal, since the group -> people relationship is the whole
-     point and shouldn't be hidden behind a toggle.
+  /* One row per group: its count (plus a done-vs-open bar, Today only) on
+     the left and its reviewers inline on the right - the group -> people
+     relationship is the whole point, so it isn't hidden behind a toggle.
      A single CSS Grid across the whole list (not each row sized on its own)
      is what makes the name/bar/count columns actually line up - the name
      column's width is the widest name in the WHOLE list, computed once, so
      every row's bar starts at the same x. Each row is a "display:contents"
      wrapper: it exists for the JS/CSS below to address as a unit, but
-     contributes no box of its own, so its 4 children become direct items of
+     contributes no box of its own, so its 3-4 children become direct items of
      the grid instead of nested inside a flex/grid container of their own -
      deliberately avoiding that nesting after it caused a real Chrome/Firefox
      split elsewhere on this page (a flex item that's also a flex container,
@@ -390,7 +391,8 @@
      Grid column tracks don't carry that ambiguity - max-content and 1fr are
      both single, well-defined algorithms, not a negotiation between item and
      container the way nested flex auto-basis is. */
-  .completed-group-grid { display: grid; grid-template-columns: max-content 110px 32px 1fr; column-gap: 10px; row-gap: 10px; align-items: center; }
+  .completed-group-grid { display: grid; grid-template-columns: max-content 110px max-content 1fr; column-gap: 10px; row-gap: 10px; align-items: center; }
+  .completed-group-grid.no-bar { grid-template-columns: max-content max-content 1fr; }
   .completed-member-row { display: contents; }
   .completed-mini-name { font-size: 12.5px; color: var(--text-primary); white-space: nowrap; }
   .completed-mini-bar { width: 110px; height: 6px; background: var(--page-plane); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
@@ -403,13 +405,14 @@
      instead of pushing it down - opening one person's breakdown shouldn't
      reflow every row underneath it. */
   .completed-member-chips { min-width: 0; position: relative; }
-  /* Below 900px there isn't room for 4 aligned columns plus a name that
+  /* Below 900px there isn't room for the aligned columns plus a name that
      might be "Engineering Department" - stack each row's pieces instead of
      forcing them into a cramped grid. Reverting .completed-member-row to a
      normal block re-enables its children's default top-to-bottom block flow
      (they're plain divs), no separate mobile markup needed. */
   @media (max-width: 900px) {
     .completed-group-grid { display: block; }
+    .completed-grid-head { display: none; }
     .completed-member-row { display: block; padding: 8px 0; }
     .completed-member-row + .completed-member-row { border-top: 1px solid var(--gridline); }
     .completed-mini-bar { width: auto; margin: 4px 0; }
@@ -515,6 +518,38 @@
     .completed-flat-people { order: 5; flex: 1 1 100%; }
   }
 
+  /* Period selector (Today / Day / Range) between the panel header and body. */
+  .completed-period-row { margin-top: 14px; }
+  .completed-period-row input[type="date"], .completed-rows-head input[type="search"] {
+    font-size: 13px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  .completed-period-row input[type="date"] { height: 36px; box-sizing: border-box; }
+  .completed-date-pair { display: flex; align-items: center; gap: 8px; }
+  .control-to { font-size: 13px; color: var(--text-muted); }
+  .completed-period-note { font-size: 12px; color: var(--status-warning); margin-top: 8px; }
+  /* Per-day totals for a range; a hatched gap = no history recorded for that
+     day (distinct from a real zero, which draws as a minimal-height bar). */
+  .completed-daily-strip { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin: 4px 0 2px; }
+  .completed-daily-col { flex: 1 1 0; min-width: 2px; height: 100%; display: flex; align-items: flex-end; }
+  .completed-daily-col.missing { background: repeating-linear-gradient(45deg, transparent 0 3px, var(--gridline) 3px 4px); }
+  .completed-daily-bar { width: 100%; background: var(--series-accepted); border-radius: 2px 2px 0 0; }
+  .completed-daily-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-bottom: 14px; }
+  /* Single-day list of the individual reviews completed. */
+  .completed-rows-section { margin-top: 20px; }
+  .completed-rows-toggle { display: flex; align-items: center; gap: 6px; background: none; border: 0; padding: 6px 0; cursor: pointer; color: var(--brand-primary); font: inherit; font-weight: 600; font-size: 13.5px; margin-top: 6px; }
+  .completed-rows-toggle-icon { display: flex; }
+  .completed-rows-toggle-icon svg { width: 16px; height: 16px; }
+  .completed-rows-toggle .chevron { display: inline-block; transition: transform .15s; }
+  .completed-rows-toggle .chevron.open { transform: rotate(90deg); }
+  .completed-rows-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .completed-rows-head input[type="search"] { flex: 1 1 240px; max-width: 380px; }
+  .completed-rows-scroll { max-height: 480px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .completed-rows-table { font-size: 12.5px; }
+  .completed-rows-table th { position: sticky; top: 0; z-index: 1; background: var(--surface-1); border-bottom: 1px solid var(--baseline); }
+  .completed-rows-table td.nowrap { white-space: nowrap; }
+  .completed-rows-note { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
   .completed-panel-footer {
     display: flex; flex-wrap: wrap; gap: 6px 16px; justify-content: space-between; align-items: center;
     font-size: 12px; color: var(--text-muted); margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--gridline);
@@ -613,9 +648,6 @@
   .bar-seg.pending { background: var(--series-pending); }
   .bar-seg.accepted { background: var(--series-accepted); }
   .bar-seg.overdue { background: var(--status-critical); }
-  .bar-total {
-    font-size: 13px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums;
-  }
 
   .tooltip {
     position: fixed; pointer-events: none; z-index: 50;
@@ -779,28 +811,42 @@
     </div>
 
     <div class="controls">
-      <div class="controls-row controls-row-filters">
-        <input type="search" id="searchBox" placeholder="Filter by review group...">
-        <input type="search" id="reviewerSearchBox" placeholder="Filter by reviewer name...">
-        <label><input type="checkbox" id="showApplicant"> Show self-service tasks (Applicant, Fee Group)</label>
+      <div class="controls-panel controls-row-filters">
+        <div class="control-group control-grow">
+          <label class="control-label" for="searchBox">Review group</label>
+          <div class="search-field"><svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg><input type="search" id="searchBox" placeholder="Filter by review group..."></div>
+        </div>
+        <div class="control-group control-grow">
+          <label class="control-label" for="reviewerSearchBox">Reviewer name</label>
+          <div class="search-field"><svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg><input type="search" id="reviewerSearchBox" placeholder="Filter by reviewer name..."></div>
+        </div>
+        <div class="control-group control-check">
+          <label class="check-label"><input type="checkbox" id="showApplicant"> Show self-service tasks (Applicant, Fee Group)</label>
+        </div>
       </div>
-      <div class="controls-row controls-row-toggles">
-        <div class="view-toggle sort-toggle">
-          <span class="sort-toggle-label">Tasks:</span>
-          <button id="taskViewOpenBtn" class="active">Open</button>
-          <button id="taskViewWithCompletedBtn">+ Completed</button>
-          <button id="taskViewCompletedOnlyBtn">Completed only</button>
-          <button id="taskViewOverdueOnlyBtn">Overdue only</button>
+      <div class="controls-panel controls-row-toggles">
+        <div class="control-group">
+          <span class="control-label">Task state</span>
+          <div class="view-toggle">
+            <button id="taskViewOpenBtn" class="active">Open</button>
+            <button id="taskViewWithCompletedBtn">+ Completed</button>
+            <button id="taskViewCompletedOnlyBtn">Completed only</button>
+            <button id="taskViewOverdueOnlyBtn">Overdue only</button>
+          </div>
         </div>
-        <div class="view-toggle sort-toggle">
-          <span class="sort-toggle-label">Sort:</span>
-          <button id="sortByNameBtn" class="active">Name</button>
-          <button id="sortByTasksBtn">Most tasks</button>
+        <div class="control-group">
+          <span class="control-label">Sort by</span>
+          <div class="view-toggle">
+            <button id="sortByNameBtn" class="active">Name</button>
+            <button id="sortByTasksBtn">Most tasks</button>
+          </div>
         </div>
-        <div class="view-toggle sort-toggle controls-push-right">
-          <span class="sort-toggle-label">View:</span>
-          <button id="chartViewBtn" class="active">Chart</button>
-          <button id="tableViewBtn">Table</button>
+        <div class="control-group controls-push-right">
+          <span class="control-label">View</span>
+          <div class="view-toggle">
+            <button id="chartViewBtn" class="active">Chart</button>
+            <button id="tableViewBtn">Table</button>
+          </div>
         </div>
       </div>
     </div>
@@ -818,7 +864,9 @@
   var AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
   var STALE_AFTER_MIN = 60; // flag if the collector hasn't run in over an hour
 
-  var state = { data: null, view: 'chart', search: '', reviewerSearch: '', showApplicant: false, taskView: 'open', groupSort: 'name', completedView: 'workflow' };
+  var state = { data: null, view: 'chart', search: '', reviewerSearch: '', showApplicant: false, taskView: 'open', groupSort: 'name', completedView: 'workflow',
+    // Completed panel period: 'today' (live snapshot) | 'day' | 'range' (both read /history)
+    period: 'today', periodDay: '', periodFrom: '', periodTo: '', history: null, rowsFilter: '', rowsOpen: false };
 
   var tooltip = document.getElementById('tooltip');
   // A Set, not a single key: filtering by reviewer name auto-opens every
@@ -1256,17 +1304,187 @@
   // on state.completedView - shown whenever there's at least one completion,
   // regardless of which Tasks: toggle is active, since supervisors want this
   // at a glance without switching modes.
+  // --- Completed panel: date selection (Today / one Day / a Range) ----------
+  //
+  // Today reads the live snapshot exactly as before. Day and Range read
+  // /history (server.js), which summarizes the collector's saved per-day
+  // files - a range is summary counts only, a single day additionally lists
+  // the individual reviews completed that day.
+
+  // Same Eastern-time "today" the collector uses (DateCompleted is a naive
+  // local timestamp, so calendar days have to be Pompano Beach's, not the
+  // viewer's browser timezone).
+  function easternTodayStr() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  }
+  function addDaysStr(dateStr, n) {
+    var p = dateStr.split('-');
+    var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2], 12));
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+  function listDatesStr(from, to) {
+    var out = [];
+    for (var d = from; d <= to && out.length < 800; d = addDaysStr(d, 1)) out.push(d);
+    return out;
+  }
+  // "Mon, Sep 22" / "Sep 22, 2026" from a YYYY-MM-DD string, built from the
+  // parts directly (new Date('YYYY-MM-DD') parses as UTC and can show the
+  // previous day in a US timezone).
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function fmtDateStr(dateStr, withWeekday, withYear) {
+    var p = dateStr.split('-');
+    var dow = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2], 12)).getUTCDay();
+    return (withWeekday ? WEEKDAYS[dow] + ', ' : '') + MONTHS[+p[1] - 1] + ' ' + (+p[2]) + (withYear ? ', ' + p[0] : '');
+  }
+  // "9:41 AM" from a naive local timestamp string - deliberately not via
+  // new Date(), so the browser's own timezone can't shift it.
+  function fmtClock(ts) {
+    if (!ts || ts.length < 16) return '';
+    var h = parseInt(ts.slice(11, 13), 10), m = ts.slice(14, 16);
+    return ((h % 12) || 12) + ':' + m + ' ' + (h >= 12 ? 'PM' : 'AM');
+  }
+
+  var historyToken = 0; // discards a stale /history response if the selection changed while it was in flight
+  function loadHistory() {
+    var from, to;
+    if (state.period === 'day') { from = to = state.periodDay; }
+    else if (state.period === 'range') { from = state.periodFrom; to = state.periodTo; }
+    else { state.history = null; render(); return; }
+    if (!from || !to) { state.history = { status: 'invalid', message: 'Pick a date to see what was completed.' }; render(); return; }
+    if (from > to) { state.history = { status: 'invalid', message: 'The start date is after the end date.' }; render(); return; }
+    var token = ++historyToken;
+    state.history = { status: 'loading', from: from, to: to };
+    render();
+    fetch('history?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to), { cache: 'no-store' })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, json: j }; }); })
+      .then(function (res) {
+        if (token !== historyToken) return;
+        if (!res.ok || !res.json || !res.json.ok) {
+          state.history = { status: 'error', message: (res.json && res.json.error) || 'Could not load history (is server.js up to date?).' };
+        } else {
+          state.history = { status: 'ok', from: from, to: to, data: res.json };
+        }
+        render();
+      })
+      .catch(function (err) {
+        if (token !== historyToken) return;
+        state.history = { status: 'error', message: 'Could not load history: ' + err.message };
+        render();
+      });
+  }
+  function setPeriod(mode) {
+    var today = easternTodayStr();
+    state.period = mode;
+    state.rowsFilter = '';
+    if (mode === 'day' && !state.periodDay) state.periodDay = addDaysStr(today, -1);
+    if (mode === 'range' && (!state.periodFrom || !state.periodTo)) { state.periodFrom = addDaysStr(today, -6); state.periodTo = today; }
+    loadHistory();
+  }
+
+  // Per-day totals for a range, as a small strip of bars (a gap where a day
+  // has no recorded history, so it can't be mistaken for a genuinely slow day).
+  function renderDailyStrip(data) {
+    var counts = {};
+    (data.ByDay || []).forEach(function (d) { counts[d.Date] = d.Count; });
+    var dates = listDatesStr(data.from, data.to);
+    if (dates.length < 2) return '';
+    var max = Math.max.apply(null, dates.map(function (d) { return counts[d] || 0; }).concat([1]));
+    return '<div class="completed-daily-strip" role="img" aria-label="Completed tasks per day">' +
+      dates.map(function (d) {
+        var has = counts[d] != null;
+        var h = has ? Math.max(3, Math.round((counts[d] / max) * 100)) : 0;
+        return '<div class="completed-daily-col' + (has ? '' : ' missing') + '" title="' + escapeHtml(fmtDateStr(d, true, true)) + ': ' + (has ? fmtInt(counts[d]) + ' completed' : 'no history recorded') + '">' +
+          '<div class="completed-daily-bar" style="height:' + h + '%"></div></div>';
+      }).join('') +
+    '</div>' +
+    '<div class="completed-daily-axis"><span>' + escapeHtml(fmtDateStr(dates[0], false, true)) + '</span><span>' + escapeHtml(fmtDateStr(dates[dates.length - 1], false, true)) + '</span></div>';
+  }
+
+  // The individual reviews completed on a single day, filterable by text.
+  function rowsToggleLabel(open, n) { return open ? 'Hide individual completed tasks' : 'Show ' + fmtInt(n) + ' individual completed tasks'; }
+  function renderCompletedRowsSection(rows) {
+    var open = !!state.rowsOpen;
+    return '<div class="completed-rows-section">' +
+      '<button type="button" class="completed-rows-toggle" id="completedRowsToggle" aria-expanded="' + open + '">' +
+        '<span class="completed-rows-toggle-icon">' + ICON_LIST + '</span>' +
+        '<span class="completed-rows-toggle-label">' + rowsToggleLabel(open, rows.length) + '</span>' +
+        '<span class="chevron' + (open ? ' open' : '') + '">&rsaquo;</span>' +
+      '</button>' +
+      '<div id="completedRowsWrap"' + (open ? '' : ' hidden') + '>' +
+      '<div class="completed-rows-head">' +
+        '<input type="search" id="completedRowsFilter" placeholder="Filter by project, task, group, or name..." value="' + escapeHtml(state.rowsFilter || '') + '">' +
+      '</div>' +
+      '<div class="completed-rows-scroll"><table class="data-table completed-rows-table"><thead><tr>' +
+        '<th>Time</th><th>Project</th><th>Location</th><th>Task</th><th>Group</th><th>Workflow</th><th>Completed by</th>' +
+      '</tr></thead><tbody id="completedRowsBody"></tbody></table></div>' +
+      '<div class="completed-rows-note" id="completedRowsNote"></div>' +
+      '</div>' +
+    '</div>';
+  }
+  function fillCompletedRows(rows) {
+    var body = document.getElementById('completedRowsBody');
+    if (!body) return;
+    var needle = (state.rowsFilter || '').trim().toLowerCase();
+    var shown = !needle ? rows : rows.filter(function (r) {
+      return [r.proj, r.loc, r.task, r.grp, r.wf, r.user].join(' ').toLowerCase().indexOf(needle) !== -1;
+    });
+    body.innerHTML = shown.map(function (r) {
+      return '<tr>' +
+        '<td class="nowrap">' + escapeHtml(fmtClock(r.at)) + '</td>' +
+        '<td class="nowrap"><b>' + escapeHtml(r.proj || ('Project ' + (r.pid == null ? '?' : r.pid))) + '</b></td>' +
+        '<td>' + escapeHtml(r.loc || '') + '</td>' +
+        '<td>' + escapeHtml(r.task || '') + '</td>' +
+        '<td>' + escapeHtml(r.grp || '') + '</td>' +
+        '<td>' + escapeHtml(r.wf || '') + '</td>' +
+        '<td class="nowrap">' + escapeHtml(r.user || 'Unknown') + '</td>' +
+      '</tr>';
+    }).join('');
+    var note = document.getElementById('completedRowsNote');
+    if (note) note.textContent = needle ? 'Showing ' + fmtInt(shown.length) + ' of ' + fmtInt(rows.length) + ' completed reviews.' : '';
+  }
+
+  // Who completed what, sliced by workflow/group/reviewer depending on
+  // state.completedView, for whichever period is selected. Always rendered
+  // (even when nothing was completed) because it now also holds the date
+  // controls - hiding it on a quiet day would hide the way to look at
+  // another day.
   function renderCompletedToday(summary, allGroups) {
     var panel = document.getElementById('completedTodayPanel');
-    if (!summary || !summary.TotalCount) { panel.style.display = 'none'; return; }
+    if (!summary) { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
+
+    var mode = state.period || 'today';
+    var today = easternTodayStr();
+    var hist = state.history;
+    var active = null; // the summary being displayed
+    var bodyMessage = '';
+    var histData = null;
+    if (mode === 'today') {
+      active = summary;
+      if (!summary.TotalCount) bodyMessage = 'Nothing completed today yet.';
+    } else if (hist && hist.status === 'ok') {
+      histData = hist.data;
+      active = histData.Summary;
+      var missingN = (histData.MissingDays || []).length;
+      var spanN = listDatesStr(histData.from, histData.to).length;
+      if (!active.TotalCount) bodyMessage = missingN >= spanN
+        ? 'This period has not been recorded yet. History is filled in a few days at a time with each refresh, so try Refresh now, or check back shortly.'
+        : 'No completed tasks were recorded for this period.';
+    } else if (hist && hist.status === 'loading') {
+      bodyMessage = 'Loading...';
+    } else {
+      bodyMessage = (hist && hist.message) || 'Pick a date to see what was completed.';
+    }
+    if (!active) active = { TotalCount: 0, WorkflowCount: 0, GroupCount: 0, StaffCount: 0, ByWorkflow: [], ByGroup: [], ByReviewer: [] };
 
     // Per (workflow, group) staff breakdown, shown inline beside every group
     // row below - summary.ByGroup already carries this (collector.js
     // computes it once for the Group view), so the workflow view just needs
     // a fast key -> ByUser lookup instead of recomputing it.
     var groupUserMap = new Map();
-    (summary.ByGroup || []).forEach(function (g) {
+    (active.ByGroup || []).forEach(function (g) {
       groupUserMap.set(g.WorkflowTemplate + '::' + g.GroupName, g.ByUser || []);
     });
 
@@ -1275,41 +1493,110 @@
     // self-contained summary) - lets the Workflow view's bars show today's
     // actual completion rate (done / (done + still open)) instead of a
     // share-of-the-busiest-group comparison that said nothing about how
-    // much work that group has left.
-    var openCountMap = new Map();
-    (allGroups || []).forEach(function (g) {
-      openCountMap.set(g.WorkflowTemplate + '::' + g.GroupName, g.OpenTaskCount || 0);
-    });
+    // much work that group has left. Only meaningful for TODAY: a past
+    // day's or a range's "still open" isn't something this snapshot knows,
+    // so those views (null map) fall back to comparing groups to each other.
+    var openCountMap = null;
+    if (mode === 'today') {
+      openCountMap = new Map();
+      (allGroups || []).forEach(function (g) {
+        openCountMap.set(g.WorkflowTemplate + '::' + g.GroupName, g.OpenTaskCount || 0);
+      });
+    }
 
-    var bodyHtml = state.completedView === 'group' ? renderCompletedByGroup(summary.ByGroup)
-      : state.completedView === 'reviewer' ? renderCompletedByReviewer(summary.ByReviewer)
-      : renderCompletedByWorkflow(summary.ByWorkflow, groupUserMap, openCountMap);
+    var bodyHtml;
+    if (bodyMessage) {
+      bodyHtml = '<div class="empty-state">' + escapeHtml(bodyMessage) + '</div>';
+    } else {
+      bodyHtml = state.completedView === 'group' ? renderCompletedByGroup(active.ByGroup)
+        : state.completedView === 'reviewer' ? renderCompletedByReviewer(active.ByReviewer)
+        : renderCompletedByWorkflow(active.ByWorkflow, groupUserMap, openCountMap);
+    }
+    var dayRows = (mode === 'day' && histData && histData.Rows) ? histData.Rows : null;
+    if (dayRows && dayRows.length) bodyHtml += renderCompletedRowsSection(dayRows);
+    if (mode === 'range' && histData) bodyHtml = renderDailyStrip(histData) + bodyHtml;
+
+    // Title / subtitle reflect the selected period.
+    var title = 'Completed today', what = 'completed today';
+    if (mode === 'day' && state.periodDay) { title = 'Completed \u2014 ' + fmtDateStr(state.periodDay, true, true); what = 'completed'; }
+    if (mode === 'range' && state.periodFrom && state.periodTo) {
+      title = 'Completed ' + fmtDateStr(state.periodFrom, false, state.periodFrom.slice(0, 4) !== state.periodTo.slice(0, 4)) + ' – ' + fmtDateStr(state.periodTo, false, true);
+      what = 'completed';
+    }
+
+    // Days in the chosen range with no saved history (history is built up
+    // over time, and only reaches back as far as the collector has filled
+    // in) - said out loud so an empty stretch isn't read as "nothing
+    // happened".
+    var periodNote = '';
+    if (mode !== 'today' && histData && histData.MissingDays && histData.MissingDays.length) {
+      var miss = histData.MissingDays.length;
+      periodNote = miss + ' day' + (miss === 1 ? '' : 's') + ' in this ' + (mode === 'day' ? 'selection' : 'range') + ' ha' + (miss === 1 ? 's' : 've') + ' no recorded history yet' +
+        (histData.EarliestAvailable ? ' (earliest recorded day: ' + fmtDateStr(histData.EarliestAvailable, false, true) + ')' : '') + '. History fills in over time.';
+    }
+
+    var viewByHtml =
+      '<div class="control-group controls-push-right">' +
+        '<span class="control-label">View by</span>' +
+        '<div class="view-toggle" id="completedViewToggle">' +
+          '<button data-completed-view="workflow"' + (state.completedView === 'workflow' ? ' class="active"' : '') + '>Workflow</button>' +
+          '<button data-completed-view="group"' + (state.completedView === 'group' ? ' class="active"' : '') + '>Group</button>' +
+          '<button data-completed-view="reviewer"' + (state.completedView === 'reviewer' ? ' class="active"' : '') + '>Staff</button>' +
+        '</div>' +
+      '</div>';
+
+    var periodRow =
+      '<div class="controls-panel completed-period-row">' +
+        '<div class="control-group">' +
+          '<span class="control-label">Period</span>' +
+          '<div class="view-toggle" id="completedPeriodToggle">' +
+            '<button data-period="today"' + (mode === 'today' ? ' class="active"' : '') + '>Today</button>' +
+            '<button data-period="day"' + (mode === 'day' ? ' class="active"' : '') + '>Day</button>' +
+            '<button data-period="range"' + (mode === 'range' ? ' class="active"' : '') + '>Range</button>' +
+          '</div>' +
+        '</div>' +
+        (mode === 'day'
+          ? '<div class="control-group"><label class="control-label" for="completedDayInput">Date</label>' +
+            '<input type="date" id="completedDayInput" value="' + escapeHtml(state.periodDay || '') + '" max="' + today + '"></div>'
+          : '') +
+        (mode === 'range'
+          ? '<div class="control-group"><span class="control-label">Date range</span>' +
+              '<div class="completed-date-pair">' +
+                '<input type="date" id="completedFromInput" value="' + escapeHtml(state.periodFrom || '') + '" max="' + today + '" aria-label="From">' +
+                '<span class="control-to">to</span>' +
+                '<input type="date" id="completedToInput" value="' + escapeHtml(state.periodTo || '') + '" max="' + today + '" aria-label="To">' +
+              '</div></div>' +
+            '<div class="control-group"><span class="control-label">Quick range</span>' +
+              '<div class="view-toggle" id="completedPresetToggle">' +
+                '<button data-preset="7">Last 7 days</button><button data-preset="30">Last 30 days</button><button data-preset="mtd">This month</button>' +
+              '</div></div>'
+          : '') +
+        viewByHtml +
+      '</div>' +
+      (periodNote ? '<div class="completed-period-note">' + escapeHtml(periodNote) + '</div>' : '');
+
+    var footerText = mode === 'today'
+      ? 'Counts reflect tasks completed today. Staff may appear in multiple workflows/groups.'
+      : 'Counts reflect tasks completed in the selected period (from saved history). Staff may appear in multiple workflows/groups.';
 
     panel.innerHTML =
       '<div class="completed-panel-header">' +
         '<div class="completed-panel-title-wrap">' +
           '<div class="completed-check-icon">' + ICON_CHECK + '</div>' +
           '<div>' +
-            '<h2 class="completed-panel-title">Completed today</h2>' +
-            '<div class="completed-panel-sub">' + fmtInt(summary.TotalCount) + ' task' + (summary.TotalCount === 1 ? '' : 's') + ' completed today' +
-              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.WorkflowCount) + ' workflow' + (summary.WorkflowCount === 1 ? '' : 's') +
-              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.GroupCount) + ' group' + (summary.GroupCount === 1 ? '' : 's') +
-              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.StaffCount) + ' staff' +
+            '<h2 class="completed-panel-title">' + escapeHtml(title) + '</h2>' +
+            '<div class="completed-panel-sub">' + fmtInt(active.TotalCount) + ' task' + (active.TotalCount === 1 ? '' : 's') + ' ' + what +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(active.WorkflowCount) + ' workflow' + (active.WorkflowCount === 1 ? '' : 's') +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(active.GroupCount) + ' group' + (active.GroupCount === 1 ? '' : 's') +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(active.StaffCount) + ' staff' +
             '</div>' +
           '</div>' +
         '</div>' +
-        '<div class="completed-panel-actions">' +
-          '<span class="sort-toggle-label">View by:</span>' +
-          '<div class="view-toggle" id="completedViewToggle">' +
-            '<button data-completed-view="workflow"' + (state.completedView === 'workflow' ? ' class="active"' : '') + '>Workflow</button>' +
-            '<button data-completed-view="group"' + (state.completedView === 'group' ? ' class="active"' : '') + '>Group</button>' +
-            '<button data-completed-view="reviewer"' + (state.completedView === 'reviewer' ? ' class="active"' : '') + '>Staff</button>' +
-          '</div>' +
-        '</div>' +
       '</div>' +
+      periodRow +
       '<div class="completed-panel-body">' + bodyHtml + '</div>' +
       '<div class="completed-panel-footer">' +
-        '<span>Counts reflect tasks completed today. Staff may appear in multiple workflows/groups.</span>' +
+        '<span>' + footerText + '</span>' +
       '</div>';
 
     document.getElementById('completedViewToggle').querySelectorAll('button').forEach(function (btn) {
@@ -1318,6 +1605,42 @@
         render();
       });
     });
+    document.getElementById('completedPeriodToggle').querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var m = btn.getAttribute('data-period');
+        if (m === (state.period || 'today')) return;
+        setPeriod(m);
+      });
+    });
+    var dayInput = document.getElementById('completedDayInput');
+    if (dayInput) dayInput.addEventListener('change', function () { state.periodDay = dayInput.value; state.rowsFilter = ''; loadHistory(); });
+    var fromInput = document.getElementById('completedFromInput');
+    var toInput = document.getElementById('completedToInput');
+    if (fromInput) fromInput.addEventListener('change', function () { state.periodFrom = fromInput.value; loadHistory(); });
+    if (toInput) toInput.addEventListener('change', function () { state.periodTo = toInput.value; loadHistory(); });
+    var presetToggle = document.getElementById('completedPresetToggle');
+    if (presetToggle) presetToggle.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var p = btn.getAttribute('data-preset');
+        var t = easternTodayStr();
+        state.periodTo = t;
+        state.periodFrom = p === 'mtd' ? t.slice(0, 8) + '01' : addDaysStr(t, -(parseInt(p, 10) - 1));
+        loadHistory();
+      });
+    });
+    if (dayRows && dayRows.length) {
+      fillCompletedRows(dayRows);
+      var rowsToggle = document.getElementById('completedRowsToggle');
+      if (rowsToggle) rowsToggle.addEventListener('click', function () {
+        state.rowsOpen = !state.rowsOpen;
+        document.getElementById('completedRowsWrap').hidden = !state.rowsOpen;
+        rowsToggle.setAttribute('aria-expanded', state.rowsOpen);
+        rowsToggle.querySelector('.chevron').classList.toggle('open', state.rowsOpen);
+        rowsToggle.querySelector('.completed-rows-toggle-label').textContent = rowsToggleLabel(state.rowsOpen, dayRows.length);
+      });
+      var rowsFilter = document.getElementById('completedRowsFilter');
+      if (rowsFilter) rowsFilter.addEventListener('input', function () { state.rowsFilter = rowsFilter.value; fillCompletedRows(dayRows); });
+    }
     wireCompletedWorkflowRows();
     wireCompletedFlatMoreLinks();
     wireCompletedTaskPopovers();
@@ -1367,28 +1690,42 @@
     var sorted = entries.slice().sort(function (a, b) {
       return (a.GroupName || '').localeCompare(b.GroupName || '');
     });
+    // Only today has a meaningful "still open" (openCountMap present); a past
+    // day or a range doesn't, so those views (null map) scale each bar
+    // against the busiest group in the list instead.
+    var maxCount = Math.max.apply(null, sorted.map(function (e) { return e.Count; }).concat([1]));
     var rowsHtml = sorted.map(function (e) {
       var name = e.GroupName || e.WorkflowTemplate || 'Unknown';
       var rowKey = keyPrefix + '::' + name;
-      // Completion rate for the day (done / (done + still open)), not a
-      // share of whichever group is busiest - a bar scaled to the busiest
-      // group said nothing about how much work THIS group still has left,
-      // which is what "done vs remaining" actually means. A group with no
-      // matching entry in data.Groups (nothing currently open) reads as
-      // fully done (100%), which is correct - there's nothing left.
-      var openCount = (openCountMap && openCountMap.get(rowKey)) || 0;
-      var dayTotal = e.Count + openCount;
-      var pct = dayTotal ? (e.Count / dayTotal * 100) : 100;
-      var titleText = escapeHtml(name) + ': ' + fmtInt(e.Count) + ' completed, ' + fmtInt(openCount) + ' still open today (' + Math.round(pct) + '% done)';
+      var pct, titleText;
+      if (openCountMap) {
+        // Completion rate for the day (done / (done + still open)), not a
+        // share of whichever group is busiest - a bar scaled to the busiest
+        // group said nothing about how much work THIS group still has left,
+        // which is what "done vs remaining" actually means. A group with no
+        // matching entry in data.Groups (nothing currently open) reads as
+        // fully done (100%), which is correct - there's nothing left.
+        var openCount = openCountMap.get(rowKey) || 0;
+        var dayTotal = e.Count + openCount;
+        pct = dayTotal ? (e.Count / dayTotal * 100) : 100;
+        titleText = escapeHtml(name) + ': ' + fmtInt(e.Count) + ' completed, ' + fmtInt(openCount) + ' still open today (' + Math.round(pct) + '% done)';
+      } else {
+        pct = maxCount ? (e.Count / maxCount * 100) : 0;
+        titleText = escapeHtml(name) + ': ' + fmtInt(e.Count) + ' completed';
+      }
       var users = groupUserMap.get(rowKey) || [];
       return '<div class="completed-member-row">' +
         '<div class="completed-mini-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>' +
-        '<div class="completed-mini-bar" title="' + titleText + '"><div class="completed-mini-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+        (openCountMap ? '<div class="completed-mini-bar" title="' + titleText + '"><div class="completed-mini-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' : '') +
         '<div class="completed-mini-count" title="' + titleText + '">' + fmtInt(e.Count) + '</div>' +
         '<div class="completed-member-chips">' + completedMemberChips(users, cls, rowKey) + '</div>' +
       '</div>';
     }).join('');
-    return '<div class="completed-group-grid">' + rowsHtml + '</div>';
+    var withBar = !!openCountMap;
+    var head = '<div class="completed-grid-head">' +
+      '<div>Group</div>' + (withBar ? '<div>Done vs open</div>' : '') + '<div style="text-align:right;">Completed</div>' +
+      '<div>' + (cls === 'ops' ? 'Staff who processed' : 'Staff who completed') + ' (number of tasks)</div></div>';
+    return '<div class="completed-group-grid' + (withBar ? '' : ' no-bar') + '">' + head + rowsHtml + '</div>';
   }
 
   // Operations chips (Review Coordinator/Submissions) are clickable - a
@@ -1461,6 +1798,13 @@
     '</div>';
   }
 
+  var ICON_GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>';
+  function completedBucketHead(cls, title, total) {
+    return '<div class="completed-bucket-head ' + cls + '">' +
+      '<span class="completed-bucket-icon">' + (cls === 'ops' ? ICON_GEAR : ICON_LIST) + '</span>' +
+      '<span>' + title + '</span><span class="completed-bucket-total">' + fmtInt(total) + ' total</span></div>';
+  }
+
   function renderCompletedByWorkflow(byWorkflow, groupUserMap, openCountMap) {
     byWorkflow = byWorkflow || [];
     if (!byWorkflow.length) return '<div class="empty-state">Nothing completed today yet.</div>';
@@ -1470,6 +1814,7 @@
       var isOpen = completedOpenKeys.has(key);
       var row = '<div class="completed-workflow-row' + (isOpen ? ' open' : '') + '" data-completed-key="' + escapeHtml(key) + '" tabindex="0" role="button" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
         '<div class="completed-chevron">' + ICON_CHEVRON + '</div>' +
+        '<span class="template-icon">' + ICON_WORKFLOW + '</span>' +
         '<div class="completed-workflow-name-wrap">' +
           '<span class="completed-workflow-name">' + escapeHtml(key) + '</span>' +
           '<span class="completed-workflow-count">' + fmtInt(w.Count) + ' completed</span>' +
@@ -1484,11 +1829,11 @@
       if (isOpen) {
         detail = '<div class="completed-detail">' +
           '<div class="completed-bucket">' +
-            '<h3 class="completed-detail-col-title">Reviews &ndash; Completed</h3>' +
+            completedBucketHead('review', 'Reviews', w.ReviewGroups.Count) +
             completedGroupRows(w.ReviewGroups.ByGroup, 'review', 'No review tasks completed today.', key, groupUserMap, openCountMap) +
           '</div>' +
           '<div class="completed-bucket">' +
-            '<h3 class="completed-detail-col-title">Processing (non-review)</h3>' +
+            completedBucketHead('ops', 'Processing', w.Operations.Count) +
             completedGroupRows(w.Operations.ByGroup, 'ops', 'No processing tasks completed today.', key, groupUserMap, openCountMap) +
           '</div>' +
         '</div>';
@@ -1608,15 +1953,15 @@
     });
     var el = document.getElementById('statRow');
     el.innerHTML =
-      statTile('Open tasks', fmtInt(totalOpen), 'neutral', ICON_LIST) +
-      statTile('Pending (unclaimed)', fmtInt(totalPending), 'pending', ICON_CLOCK) +
-      statTile('Accepted (in progress)', fmtInt(totalAccepted), 'accepted', ICON_ACCEPTED) +
-      statTile('Overdue', fmtInt(totalOverdue), 'overdue', ICON_ALERT) +
-      statTile('Completed today', fmtInt(completedTodayTotal), 'accepted', ICON_CHECK);
+      statTile('Open tasks', fmtInt(totalOpen), 'neutral', ICON_LIST, 'All tasks not yet completed') +
+      statTile('Pending', fmtInt(totalPending), 'pending', ICON_CLOCK, 'Pending: waiting in a group, not yet claimed by anyone') +
+      statTile('In progress', fmtInt(totalAccepted), 'accepted', ICON_ACCEPTED, 'Accepted: someone has picked the task up and is working on it') +
+      statTile('Overdue', fmtInt(totalOverdue), 'overdue', ICON_ALERT, 'Open tasks past their due date') +
+      statTile('Completed today', fmtInt(completedTodayTotal), 'done', ICON_CHECK, 'Tasks completed today (Eastern time)');
   }
 
-  function statTile(label, value, cls, icon) {
-    return '<div class="stat-tile"><div class="stat-icon ' + cls + '">' + icon + '</div>' +
+  function statTile(label, value, cls, icon, tip) {
+    return '<div class="stat-tile ' + cls + '" title="' + escapeHtml(tip || '') + '"><div class="stat-icon ' + cls + '">' + icon + '</div>' +
       '<div class="stat-text"><div class="stat-label">' + label + '</div>' +
       '<div class="stat-value ' + cls + '">' + value + '</div></div></div>';
   }

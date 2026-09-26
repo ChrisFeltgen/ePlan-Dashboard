@@ -12,7 +12,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { runCollector } = require('./collector');
+const { runCollector, readHistoryRange, isValidDateStr, listDates, easternToday, HISTORY_MAX_RANGE_DAYS } = require('./collector');
 
 const ROOT = __dirname;
 const PORT = process.env.PORT || 5757;
@@ -112,6 +112,30 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+
+// GET /history?from=YYYY-MM-DD&to=YYYY-MM-DD (or ?date=YYYY-MM-DD for one day):
+// completed-task summary for that inclusive range, read from the collector's
+// per-day history files. A single day also returns the actual task list.
+async function handleHistory(rawUrl, res) {
+  const q = new URL(rawUrl, 'http://localhost').searchParams;
+  const from = q.get('from') || q.get('date');
+  const to = q.get('to') || q.get('date') || from;
+  if (!isValidDateStr(from) || !isValidDateStr(to)) {
+    sendJson(res, 400, { ok: false, error: 'from/to (or date) must be real YYYY-MM-DD dates.' });
+    return;
+  }
+  if (from > to) { sendJson(res, 400, { ok: false, error: 'from must not be after to.' }); return; }
+  const today = easternToday();
+  if (from > today) { sendJson(res, 400, { ok: false, error: 'That date is in the future.' }); return; }
+  const clampedTo = to > today ? today : to;
+  if (listDates(from, clampedTo).length > HISTORY_MAX_RANGE_DAYS) {
+    sendJson(res, 400, { ok: false, error: `Range too long (max ${HISTORY_MAX_RANGE_DAYS} days).` });
+    return;
+  }
+  const result = await readHistoryRange(from, clampedTo, { includeRows: from === clampedTo });
+  sendJson(res, 200, Object.assign({ ok: true, Today: today }, result));
+}
+
 function serveStatic(url, res, rawUrl) {
   let filePath = path.join(ROOT, decodeURIComponent(url.split('?')[0]));
   if (url === '/') filePath = path.join(ROOT, 'workload-dashboard.html');
@@ -200,6 +224,11 @@ const server = http.createServer((req, res) => {
       elapsedSeconds: refreshStartedAt ? Math.round((Date.now() - refreshStartedAt) / 1000) : null,
       log: refreshLog
     });
+    return;
+  }
+
+  if (url.split('?')[0] === '/history' && req.method === 'GET') {
+    handleHistory(url, res).catch((err) => sendJson(res, 500, { ok: false, error: err.message }));
     return;
   }
 

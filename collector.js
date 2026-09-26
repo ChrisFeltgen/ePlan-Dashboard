@@ -378,6 +378,261 @@ function runReportTablesChildProcess(log) {
   });
 }
 
+// --- completed-task summary (shared by today's snapshot and history) -------
+
+// Within a workflow, "Review Coordinator" and "Submissions" are process/
+// routing groups, not technical review disciplines - the coordinator setup
+// tasks resolved via WFlowActivities (see resolveInstanceID below) mostly
+// land here. Splitting them out as "Operations" keeps the review-group
+// breakdown from being diluted by routing overhead.
+const OPERATIONS_GROUP_RE = /^(review coordinator|submissions)$/i;
+// Applicant/Fee Group tasks are excluded from every completed-task count
+// regardless of the dashboard's "show self-service tasks" toggle (which only
+// controls whether those groups appear in the workload breakdown) - a
+// self-service task getting marked done isn't staff work, so it has no place
+// in a staff performance count.
+const SELF_SERVICE_GROUP_RE = /^(applicant|fee group)$/i;
+
+function sortedCountArray(map, nameField) {
+  return [...map.entries()]
+    .map(([k, count]) => ({ [nameField]: k, Count: count }))
+    .sort((a, b) => b.Count - a.Count || String(a[nameField]).localeCompare(String(b[nameField])));
+}
+// ByTask is per-person, not per-group - a single "Review Coordinator" total
+// hides that the person did several distinct routing steps (Prescreen, Begin
+// Review, Batch Stamp, ...), which is exactly what the per-employee task
+// breakdown popover on the dashboard needs. Cheap to track for every group,
+// not just Operations ones, so it stays available if a review-group
+// breakdown is ever wanted too.
+function sortedUserArray(map) {
+  return [...map.values()]
+    .sort((a, b) => b.Count - a.Count || (a.UserName || '').localeCompare(b.UserName || ''))
+    .map((u) => ({ UserID: u.UserID, UserName: u.UserName, Count: u.Count, ByTask: sortedCountArray(u.ByTask, 'TaskName') }));
+}
+// ProjectDox appends " (Reassigned from <PERSON>)" to a task's name when it's
+// reassigned after being accepted, which would otherwise split one real task
+// type into a separate breakdown row per prior assignee (e.g. "Prescreen
+// Review (Main Permit)" vs "Prescreen Review (Main Permit) (Reassigned from
+// LEIDY ORTEGA)"). Greedy .* up to the trailing ")" so a name that itself
+// contains parentheses still strips cleanly. Only applied to the per-person
+// ByTask breakdown - the task's raw TaskName elsewhere (e.g. Task Workload's
+// detail table, or the single-day task list) is left untouched.
+function baseTaskName(taskName) {
+  return (taskName || '').replace(/\s*\(Reassigned from .*\)\s*$/i, '').trim() || 'Unknown task';
+}
+function bumpUser(map, key, userId, userName, taskName) {
+  if (!map.has(key)) map.set(key, { UserID: userId, UserName: userName || 'Unknown', Count: 0, ByTask: new Map() });
+  const entry = map.get(key);
+  entry.Count++;
+  const tName = baseTaskName(taskName);
+  entry.ByTask.set(tName, (entry.ByTask.get(tName) || 0) + 1);
+}
+
+// Incremental so a multi-month range can be summarized one day-file at a
+// time without ever holding every raw row in memory at once. add() takes a
+// normalized row: { WorkflowTemplate, GroupName, UserID, UserName, TaskName }
+// (already filtered to completed, non-self-service tasks). Unnamed/unresolved
+// reviewers (UserID missing or the GetUser lookup failed) are grouped under a
+// single "Unknown" bucket rather than dropped, so the totals still reconcile.
+function createCompletedSummary() {
+  const byTemplate = new Map(); // WorkflowTemplate -> { Count, Operations: {Count, ByGroup, ByUser}, ReviewGroups: {...} }
+  const byGroupFlat = new Map(); // template::group -> { WorkflowTemplate, GroupName, IsOperations, Count, ByUser }
+  const byReviewerFlat = new Map(); // userKey -> { UserID, UserName, Count, ByWorkflow, ByGroup }
+
+  function add(r) {
+    const template = r.WorkflowTemplate || 'Unknown';
+    const groupName = r.GroupName || 'Unknown';
+    const isOps = OPERATIONS_GROUP_RE.test(groupName);
+    const userKey = r.UserID != null ? String(r.UserID) : 'unknown';
+    const userName = r.UserName || 'Unknown';
+
+    if (!byTemplate.has(template)) {
+      byTemplate.set(template, {
+        WorkflowTemplate: template, Count: 0,
+        Operations: { Count: 0, ByGroup: new Map(), ByUser: new Map() },
+        ReviewGroups: { Count: 0, ByGroup: new Map(), ByUser: new Map() }
+      });
+    }
+    const t = byTemplate.get(template);
+    t.Count++;
+    const bucket = isOps ? t.Operations : t.ReviewGroups;
+    bucket.Count++;
+    bucket.ByGroup.set(groupName, (bucket.ByGroup.get(groupName) || 0) + 1);
+    bumpUser(bucket.ByUser, userKey, r.UserID, userName, r.TaskName);
+
+    const gKey = `${template}::${groupName}`;
+    if (!byGroupFlat.has(gKey)) {
+      byGroupFlat.set(gKey, { WorkflowTemplate: template, GroupName: groupName, IsOperations: isOps, Count: 0, ByUser: new Map() });
+    }
+    const gf = byGroupFlat.get(gKey);
+    gf.Count++;
+    bumpUser(gf.ByUser, userKey, r.UserID, userName, r.TaskName);
+
+    if (!byReviewerFlat.has(userKey)) {
+      byReviewerFlat.set(userKey, { UserID: r.UserID, UserName: userName, Count: 0, OperationsCount: 0, ReviewGroupsCount: 0, ByWorkflow: new Map(), ByGroup: new Map() });
+    }
+    const rf = byReviewerFlat.get(userKey);
+    rf.Count++;
+    if (isOps) rf.OperationsCount++; else rf.ReviewGroupsCount++;
+    rf.ByWorkflow.set(template, (rf.ByWorkflow.get(template) || 0) + 1);
+    rf.ByGroup.set(groupName, (rf.ByGroup.get(groupName) || 0) + 1);
+  }
+
+  function finish() {
+    return {
+      TotalCount: [...byTemplate.values()].reduce((s, t) => s + t.Count, 0),
+      WorkflowCount: byTemplate.size,
+      GroupCount: byGroupFlat.size,
+      StaffCount: byReviewerFlat.size,
+      ByWorkflow: [...byTemplate.values()].map((t) => ({
+        WorkflowTemplate: t.WorkflowTemplate,
+        Count: t.Count,
+        Operations: { Count: t.Operations.Count, ByGroup: sortedCountArray(t.Operations.ByGroup, 'GroupName'), ByUser: sortedUserArray(t.Operations.ByUser) },
+        ReviewGroups: { Count: t.ReviewGroups.Count, ByGroup: sortedCountArray(t.ReviewGroups.ByGroup, 'GroupName'), ByUser: sortedUserArray(t.ReviewGroups.ByUser) }
+      })).sort((a, b) => b.Count - a.Count || a.WorkflowTemplate.localeCompare(b.WorkflowTemplate)),
+      ByGroup: [...byGroupFlat.values()].map((g) => ({
+        WorkflowTemplate: g.WorkflowTemplate, GroupName: g.GroupName, IsOperations: g.IsOperations, Count: g.Count,
+        ByUser: sortedUserArray(g.ByUser)
+      })).sort((a, b) => b.Count - a.Count || a.GroupName.localeCompare(b.GroupName)),
+      ByReviewer: [...byReviewerFlat.values()].map((r) => ({
+        UserID: r.UserID, UserName: r.UserName, Count: r.Count,
+        OperationsCount: r.OperationsCount, ReviewGroupsCount: r.ReviewGroupsCount,
+        ByWorkflow: sortedCountArray(r.ByWorkflow, 'WorkflowTemplate'),
+        ByGroup: sortedCountArray(r.ByGroup, 'GroupName')
+      })).sort((a, b) => b.Count - a.Count || a.UserName.localeCompare(b.UserName))
+    };
+  }
+  return { add, finish };
+}
+
+// --- completed-task history (one small file per Eastern calendar day) ---------
+//
+// Why files on disk instead of just recomputing from ProjectDox on demand: a
+// completed task is only visible in ONE of two places at a time - the live
+// WFlowTasks table while its workflow instance is still open, then (after a
+// lag) the Report* mirror once the instance closes. In between, it can be in
+// neither (the same gap the completed-today accumulator cache works around).
+// Saving each day's completions as we observe them, and only ever ADDING to
+// a day's file, means a task seen once is never lost. One file per day (not
+// one big file) so a request only loads the days it asked for, one at a time,
+// which keeps memory flat on the memory-limited host regardless of how long
+// a range is.
+
+const HISTORY_DIR = path.join(ROOT, 'workload-history');
+// Permanent lookups for history (project number/location never change, unlike
+// the short-TTL projectCache which also carries mutable Status), plus short
+// negative caches so a since-deleted user/project/instance isn't re-requested
+// (and re-failing) on every single refresh.
+const HISTORY_LOOKUPS_JSON = path.join(ROOT, 'workload-history-lookups.json');
+// How far back the collector keeps history for (it backfills toward this a
+// few days per refresh; see HISTORY_MAX_NEW_DAYS_PER_RUN), overridable.
+const HISTORY_DAYS = Math.max(1, parseInt(process.env.HISTORY_DAYS || '90', 10) || 90);
+// A brand-new backfill can mean hundreds of GetWorkflowInstance/GetProject
+// calls per missing day - capped per run so one refresh isn't stretched out
+// for minutes; history simply fills in over the next few refreshes instead.
+const HISTORY_MAX_NEW_DAYS_PER_RUN = Math.max(0, parseInt(process.env.HISTORY_MAX_NEW_DAYS_PER_RUN || '15', 10) || 15);
+// Recent days are re-derived (rows only ever added, never removed) because a
+// just-closed workflow's tasks can take a while to show up in the Report*
+// mirror - see the block comment above. Older days are treated as settled.
+const HISTORY_RESETTLE_DAYS = 14;
+const HISTORY_RESETTLE_MIN_AGE_HOURS = 12;
+const HISTORY_MAX_RANGE_DAYS = 400;
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function isValidDateStr(s) {
+  if (typeof s !== 'string' || !DATE_RE.test(s)) return false;
+  const d = new Date(s + 'T12:00:00Z');
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+// Pure calendar arithmetic on YYYY-MM-DD strings (noon UTC), so DST never
+// shifts a date by one.
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function listDates(from, to) {
+  const out = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+function easternToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+}
+
+function historyFile(date) { return path.join(HISTORY_DIR, `${date}.json`); }
+function listHistoryDates() {
+  try {
+    return fs.readdirSync(HISTORY_DIR).map((f) => f.match(/^(\d{4}-\d{2}-\d{2})\.json$/)).filter(Boolean).map((m) => m[1]).sort();
+  } catch (e) {
+    return [];
+  }
+}
+function readHistoryDay(date) {
+  return readJsonSafe(historyFile(date), null);
+}
+// Written to a temp file then renamed, so a request reading a day while a
+// refresh is rewriting it never sees a half-written file.
+function writeHistoryDay(date, obj) {
+  fs.mkdirSync(HISTORY_DIR, { recursive: true });
+  const target = historyFile(date);
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8');
+  fs.renameSync(tmp, target);
+}
+
+// A stored history row is deliberately compact (short keys, no per-task
+// description) - ~570 completions/day x a year adds up.
+//   id=WFlowTaskID wf=workflow template grp=group uid/user=who completed it
+//   task=raw task name pid/proj/loc=project id/number/location at=DateCompleted
+// Project number/location are trimmed: this database right-pads CHAR-typed
+// columns with spaces (a location comes back as "421 SE 6 AV" followed by
+// ~35 trailing spaces).
+function toHistoryRow(r) {
+  const trimmed = (s) => (s == null ? null : (String(s).trim() || null));
+  return {
+    id: r.id, wf: r.wf || null, grp: trimmed(r.grp), uid: r.uid != null ? r.uid : null, user: r.user || null,
+    task: r.task || null, pid: r.pid != null ? r.pid : null, proj: trimmed(r.proj), loc: trimmed(r.loc), at: r.at || null
+  };
+}
+function historyRowToSummaryRow(h) {
+  return { WorkflowTemplate: h.wf, GroupName: h.grp, UserID: h.uid, UserName: h.user, TaskName: h.task };
+}
+
+// Summary (and, for a single day, the task list) for an inclusive date range,
+// read from the day files one at a time. Returns which days in the range have
+// no file yet, so the dashboard can say so instead of silently under-reporting.
+async function readHistoryRange(from, to, opts = {}) {
+  const includeRows = !!opts.includeRows;
+  const dates = listDates(from, to);
+  const available = new Set(listHistoryDates());
+  const acc = createCompletedSummary();
+  const byDay = [];
+  const missingDays = [];
+  const rows = [];
+  for (const date of dates) {
+    if (!available.has(date)) { missingDays.push(date); continue; }
+    const day = await fs.promises.readFile(historyFile(date), 'utf8').then((s) => JSON.parse(stripBom(s))).catch(() => null);
+    if (!day || !Array.isArray(day.rows)) { missingDays.push(date); continue; }
+    for (const h of day.rows) acc.add(historyRowToSummaryRow(h));
+    byDay.push({ Date: date, Count: day.rows.length });
+    if (includeRows) for (const h of day.rows) rows.push(h);
+  }
+  if (includeRows) rows.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+  const allDates = listHistoryDates();
+  return {
+    from, to,
+    Summary: acc.finish(),
+    ByDay: byDay,
+    MissingDays: missingDays,
+    EarliestAvailable: allDates[0] || null,
+    LatestAvailable: allDates[allDates.length - 1] || null,
+    Rows: includeRows ? rows : undefined
+  };
+}
+
 // --- main collector --------------------------------------------------------
 
 async function runCollector(opts = {}) {
@@ -979,127 +1234,19 @@ async function runCollector(opts = {}) {
     a.WorkflowTemplate.localeCompare(b.WorkflowTemplate) || a.GroupName.localeCompare(b.GroupName)
   );
 
-  // Completed-today breakdown, across every group, sliced three ways
-  // (by workflow, by group, by reviewer) so the dashboard can answer "who
+  // Completed-today breakdown, across every group, sliced three ways (by
+  // workflow, by group, by reviewer) so the dashboard can answer "who
   // completed what today" without requiring someone to open each group one
-  // at a time. Unnamed/unresolved reviewers (UserID missing or the GetUser
-  // lookup failed) are grouped under a single "Unknown" bucket rather than
-  // dropped, so the totals still reconcile.
-  //
-  // Applicant/Fee Group tasks are excluded regardless of the dashboard's
-  // "show self-service tasks" toggle (which only controls whether those
-  // groups appear in the workload breakdown) - a self-service task getting
-  // marked done isn't staff work, so it has no place in a staff performance
-  // count.
-  //
-  // Within a workflow, "Review Coordinator" and "Submissions" are process/
-  // routing groups, not technical review disciplines - the coordinator
-  // setup tasks resolved via WFlowActivities (see resolveInstanceID above)
-  // mostly land here. Splitting them out as "Operations" keeps the
-  // review-group breakdown from being diluted by routing overhead.
-  const OPERATIONS_GROUP_RE = /^(review coordinator|submissions)$/i;
-  function sortedCountArray(map, nameField) {
-    return [...map.entries()]
-      .map(([k, count]) => ({ [nameField]: k, Count: count }))
-      .sort((a, b) => b.Count - a.Count || String(a[nameField]).localeCompare(String(b[nameField])));
-  }
-  // ByTask is per-person, not per-group - a single "Review Coordinator"
-  // total hides that the person did several distinct routing steps
-  // (Prescreen, Begin Review, Batch Stamp, ...), which is exactly what the
-  // per-employee task breakdown popover on the dashboard needs. Cheap to
-  // track for every group, not just Operations ones, so it stays available
-  // if a review-group breakdown is ever wanted too.
-  function sortedUserArray(map) {
-    return [...map.values()]
-      .sort((a, b) => b.Count - a.Count || (a.UserName || '').localeCompare(b.UserName || ''))
-      .map((u) => ({ UserID: u.UserID, UserName: u.UserName, Count: u.Count, ByTask: sortedCountArray(u.ByTask, 'TaskName') }));
-  }
-  // ProjectDox appends " (Reassigned from <PERSON>)" to a task's name when it's
-  // reassigned after being accepted, which would otherwise split one real
-  // task type into a separate breakdown row per prior assignee (e.g.
-  // "Prescreen Review (Main Permit)" vs "Prescreen Review (Main Permit)
-  // (Reassigned from LEIDY ORTEGA)"). Greedy .* up to the trailing ")" so a
-  // name that itself contains parentheses still strips cleanly. Only applied
-  // to the per-person ByTask breakdown - the task's raw TaskName elsewhere
-  // (e.g. Task Workload's detail table) is left untouched.
-  function baseTaskName(taskName) {
-    return (taskName || '').replace(/\s*\(Reassigned from .*\)\s*$/i, '').trim() || 'Unknown task';
-  }
-  function bumpUser(map, key, userId, userName, taskName) {
-    if (!map.has(key)) map.set(key, { UserID: userId, UserName: userName || 'Unknown', Count: 0, ByTask: new Map() });
-    const entry = map.get(key);
-    entry.Count++;
-    const tName = baseTaskName(taskName);
-    entry.ByTask.set(tName, (entry.ByTask.get(tName) || 0) + 1);
-  }
-
-  const byTemplate = new Map(); // WorkflowTemplate -> { Count, Operations: {Count, ByGroup, ByUser}, ReviewGroups: {...} }
-  const byGroupFlat = new Map(); // template::group -> { WorkflowTemplate, GroupName, IsOperations, Count, ByUser }
-  const byReviewerFlat = new Map(); // userKey -> { UserID, UserName, Count, ByWorkflow, ByGroup }
-
+  // at a time. See createCompletedSummary() for the aggregation rules
+  // (Operations vs Reviews split, self-service exclusion, task-name
+  // normalization) - shared with the history view.
+  const todaySummaryAcc = createCompletedSummary();
   for (const r of detailRows) {
     if (r.TaskStatus !== 'Completed') continue;
-    if (/^(applicant|fee group)$/i.test(r.GroupName || '')) continue;
-    const template = r.WorkflowTemplate || 'Unknown';
-    const groupName = r.GroupName || 'Unknown';
-    const isOps = OPERATIONS_GROUP_RE.test(groupName);
-    const userKey = r.UserID != null ? String(r.UserID) : 'unknown';
-    const userName = r.AssignedUserName || 'Unknown';
-
-    if (!byTemplate.has(template)) {
-      byTemplate.set(template, {
-        WorkflowTemplate: template, Count: 0,
-        Operations: { Count: 0, ByGroup: new Map(), ByUser: new Map() },
-        ReviewGroups: { Count: 0, ByGroup: new Map(), ByUser: new Map() }
-      });
-    }
-    const t = byTemplate.get(template);
-    t.Count++;
-    const bucket = isOps ? t.Operations : t.ReviewGroups;
-    bucket.Count++;
-    bucket.ByGroup.set(groupName, (bucket.ByGroup.get(groupName) || 0) + 1);
-    bumpUser(bucket.ByUser, userKey, r.UserID, userName, r.TaskName);
-
-    const gKey = `${template}::${groupName}`;
-    if (!byGroupFlat.has(gKey)) {
-      byGroupFlat.set(gKey, { WorkflowTemplate: template, GroupName: groupName, IsOperations: isOps, Count: 0, ByUser: new Map() });
-    }
-    const gf = byGroupFlat.get(gKey);
-    gf.Count++;
-    bumpUser(gf.ByUser, userKey, r.UserID, userName, r.TaskName);
-
-    if (!byReviewerFlat.has(userKey)) {
-      byReviewerFlat.set(userKey, { UserID: r.UserID, UserName: userName, Count: 0, OperationsCount: 0, ReviewGroupsCount: 0, ByWorkflow: new Map(), ByGroup: new Map() });
-    }
-    const rf = byReviewerFlat.get(userKey);
-    rf.Count++;
-    if (isOps) rf.OperationsCount++; else rf.ReviewGroupsCount++;
-    rf.ByWorkflow.set(template, (rf.ByWorkflow.get(template) || 0) + 1);
-    rf.ByGroup.set(groupName, (rf.ByGroup.get(groupName) || 0) + 1);
+    if (SELF_SERVICE_GROUP_RE.test(r.GroupName || '')) continue;
+    todaySummaryAcc.add({ WorkflowTemplate: r.WorkflowTemplate, GroupName: r.GroupName, UserID: r.UserID, UserName: r.AssignedUserName, TaskName: r.TaskName });
   }
-
-  const completedTodaySummary = {
-    TotalCount: [...byTemplate.values()].reduce((s, t) => s + t.Count, 0),
-    WorkflowCount: byTemplate.size,
-    GroupCount: byGroupFlat.size,
-    StaffCount: byReviewerFlat.size,
-    ByWorkflow: [...byTemplate.values()].map((t) => ({
-      WorkflowTemplate: t.WorkflowTemplate,
-      Count: t.Count,
-      Operations: { Count: t.Operations.Count, ByGroup: sortedCountArray(t.Operations.ByGroup, 'GroupName'), ByUser: sortedUserArray(t.Operations.ByUser) },
-      ReviewGroups: { Count: t.ReviewGroups.Count, ByGroup: sortedCountArray(t.ReviewGroups.ByGroup, 'GroupName'), ByUser: sortedUserArray(t.ReviewGroups.ByUser) }
-    })).sort((a, b) => b.Count - a.Count || a.WorkflowTemplate.localeCompare(b.WorkflowTemplate)),
-    ByGroup: [...byGroupFlat.values()].map((g) => ({
-      WorkflowTemplate: g.WorkflowTemplate, GroupName: g.GroupName, IsOperations: g.IsOperations, Count: g.Count,
-      ByUser: sortedUserArray(g.ByUser)
-    })).sort((a, b) => b.Count - a.Count || a.GroupName.localeCompare(b.GroupName)),
-    ByReviewer: [...byReviewerFlat.values()].map((r) => ({
-      UserID: r.UserID, UserName: r.UserName, Count: r.Count,
-      OperationsCount: r.OperationsCount, ReviewGroupsCount: r.ReviewGroupsCount,
-      ByWorkflow: sortedCountArray(r.ByWorkflow, 'WorkflowTemplate'),
-      ByGroup: sortedCountArray(r.ByGroup, 'GroupName')
-    })).sort((a, b) => b.Count - a.Count || a.UserName.localeCompare(b.UserName))
-  };
+  const completedTodaySummary = todaySummaryAcc.finish();
 
   const snapshot = {
     GeneratedAt: new Date().toISOString(),
@@ -1109,12 +1256,216 @@ async function runCollector(opts = {}) {
   };
   writeJson(SNAPSHOT_JSON, snapshot);
 
+  // History is a bonus on top of the snapshot that's already been written -
+  // a failure here must never fail (or hide) a refresh whose main job
+  // succeeded.
+  try {
+    await updateCompletedHistory();
+  } catch (e) {
+    log(`WARN: completed-task history update failed (${e.message}) - the dashboard snapshot itself is unaffected.`);
+  }
+
+  // --- completed-task history --------------------------------------------
+  //
+  // Writes today's completions to today's day file (adding to whatever is
+  // already there - a file only ever grows), re-derives the last couple of
+  // weeks from the live + Report tables (a just-closed workflow's tasks can
+  // lag into the Report mirror), and backfills a few older missing days per
+  // run toward HISTORY_DAYS. See the block comment above HISTORY_DIR for why
+  // this exists as files at all.
+  async function updateCompletedHistory() {
+    const today = todayEastern;
+    const nowMs = Date.now();
+    const lookups = readJsonSafe(HISTORY_LOOKUPS_JSON, {});
+    lookups.projects = lookups.projects || {};
+    lookups.failed = lookups.failed || { instances: {}, projects: {}, users: {} };
+    const NEG_TTL_MS = 24 * 3600 * 1000;
+    const recentlyFailed = (kind, id) => {
+      const at = lookups.failed[kind][String(id)];
+      return at && (nowMs - new Date(at).getTime()) < NEG_TTL_MS;
+    };
+
+    // Which past days to (re)derive from the live + Report tables this run.
+    // Skipped entirely when the Report tables couldn't be loaded - deriving a
+    // past day from the live table alone would write a file that's missing
+    // every closed workflow's tasks and then look "complete".
+    const haveDates = new Set(listHistoryDates());
+    const derive = new Set();
+    let reportEarliest = null;
+    let missingRemaining = 0;
+    if (reportTasks.length > 0) {
+      for (const t of reportTasks) {
+        if (t.WFlowTaskStatusTypeID !== 1 || !t.DateCompleted) continue;
+        const d = t.DateCompleted.slice(0, 10);
+        if (reportEarliest === null || d < reportEarliest) reportEarliest = d;
+      }
+      const oldest = addDays(today, -HISTORY_DAYS);
+      const missing = [];
+      for (let d = addDays(today, -1); d >= oldest; d = addDays(d, -1)) {
+        if (!haveDates.has(d) && (reportEarliest === null || d >= reportEarliest)) missing.push(d);
+      }
+      missing.slice(0, HISTORY_MAX_NEW_DAYS_PER_RUN).forEach((d) => derive.add(d));
+      missingRemaining = Math.max(0, missing.length - HISTORY_MAX_NEW_DAYS_PER_RUN);
+      for (let d = addDays(today, -1); d >= addDays(today, -HISTORY_RESETTLE_DAYS); d = addDays(d, -1)) {
+        if (!haveDates.has(d)) continue;
+        let ageHours = Infinity;
+        try { ageHours = (nowMs - fs.statSync(historyFile(d)).mtimeMs) / 3600000; } catch (e) {}
+        if (ageHours >= HISTORY_RESETTLE_MIN_AGE_HOURS) derive.add(d);
+      }
+    }
+
+    // Candidate completed tasks (live table + Report mirror, deduped by task
+    // id) for every date being derived.
+    const candidates = [];
+    if (derive.size) {
+      const seen = new Set();
+      const consider = (t) => {
+        if (t.WFlowTaskStatusTypeID !== 1 || !t.DateCompleted) return;
+        if (!derive.has(t.DateCompleted.slice(0, 10))) return;
+        if (t.WFlowTaskID != null) {
+          if (seen.has(t.WFlowTaskID)) return;
+          seen.add(t.WFlowTaskID);
+        }
+        if (resolveInstanceID(t) == null) return;
+        candidates.push(t);
+      };
+      for (const t of tasks) consider(t);
+      for (const t of reportTasks) consider(t);
+    }
+
+    // Instances: any cached entry works regardless of age - which project and
+    // workflow template an instance belongs to never changes.
+    const instanceIds = [...new Set(candidates.map((t) => String(resolveInstanceID(t))))];
+    const instancesToFetch = instanceIds.filter((id) => {
+      const e = instanceCache[id];
+      if (e && e.SchemaVersion === CACHE_SCHEMA_VERSION) return false;
+      return !recentlyFailed('instances', id);
+    });
+    let instanceCacheDirty = false;
+    await mapConcurrent(instancesToFetch, CONCURRENCY, async (id) => {
+      try {
+        const inst = await getWorkflowInstance(sessionId, id);
+        instanceCache[id] = {
+          WFlowInstanceID: inst.WFlowInstanceID, WFlowID: inst.WFlowID, EntityID: inst.EntityID,
+          WFlowInstanceStateID: inst.WFlowInstanceStateID, WFlowInstanceStateName: inst.WFlowInstanceStateName,
+          InstanceName: inst.InstanceName, Revision: parseRevision(inst.InstanceName), DateCompleted: inst.DateCompleted,
+          SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString()
+        };
+        instanceCacheDirty = true;
+      } catch (e) {
+        lookups.failed.instances[id] = new Date().toISOString();
+        log(`WARN history: GetWorkflowInstance(${id}) failed: ${e.message}`);
+      }
+    });
+    if (instanceCacheDirty) writeJson(INSTANCE_CACHE_JSON, instanceCache);
+
+    // Rows to persist, grouped by their completion date.
+    const rowsByDate = new Map(); // date -> row[]
+    const omittedByDate = new Map(); // date -> count of tasks that couldn't be resolved this run
+    const pushRow = (row) => {
+      const d = (row.at || '').slice(0, 10);
+      if (!d) return;
+      if (!rowsByDate.has(d)) rowsByDate.set(d, []);
+      rowsByDate.get(d).push(row);
+    };
+
+    // Today's completions come from the same detailRows the dashboard itself
+    // just used (including any rescued from the same-day accumulator cache).
+    for (const r of detailRows) {
+      if (r.TaskStatus !== 'Completed') continue;
+      const grp = (r.GroupName || '').trim();
+      if (SELF_SERVICE_GROUP_RE.test(grp)) continue;
+      pushRow({ id: r.WFlowTaskID, wf: r.WorkflowTemplate, grp, uid: r.UserID, user: r.AssignedUserName, task: r.TaskName, pid: r.ProjectID, proj: r.ProjectName, loc: r.ProjectLocation, at: r.DateCompleted });
+    }
+    // Past days derived above.
+    for (const t of candidates) {
+      const d = t.DateCompleted.slice(0, 10);
+      const inst = instanceCache[String(resolveInstanceID(t))];
+      if (!inst) { omittedByDate.set(d, (omittedByDate.get(d) || 0) + 1); continue; }
+      const grp = (t.GroupName || '').trim();
+      if (SELF_SERVICE_GROUP_RE.test(grp)) continue;
+      const cachedProj = projectCache[String(inst.EntityID)];
+      pushRow({
+        id: t.WFlowTaskID, wf: wflowNameByID.get(String(inst.WFlowID)) || `WFlow${inst.WFlowID}`, grp, uid: t.UserID, user: null,
+        task: t.TaskName, pid: inst.EntityID, proj: cachedProj ? cachedProj.Name : null, loc: cachedProj ? cachedProj.Location : null, at: t.DateCompleted
+      });
+    }
+
+    // Reviewer names and project numbers for whatever's still unresolved.
+    const allRows = [...rowsByDate.values()].flat();
+    const uidsToFetch = [...new Set(allRows.filter((r) => !r.user && r.uid != null).map((r) => String(r.uid)))]
+      .filter((uid) => !userCache[uid] && !recentlyFailed('users', uid));
+    await mapConcurrent(uidsToFetch, CONCURRENCY, async (uid) => {
+      try {
+        const u = await getUser(sessionId, uid);
+        const name = u.FullName || `${u.FirstName || ''} ${u.LastName || ''}`.trim() || u.Email || null;
+        userCache[uid] = { UserID: uid, Name: name, SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
+      } catch (e) {
+        lookups.failed.users[uid] = new Date().toISOString();
+        log(`WARN history: GetUser(${uid}) failed: ${e.message}`);
+      }
+    });
+    if (uidsToFetch.length) writeJson(USER_CACHE_JSON, userCache);
+    for (const r of allRows) {
+      if (!r.user && r.uid != null && userCache[String(r.uid)]) r.user = userCache[String(r.uid)].Name;
+    }
+
+    const pidsToFetch = [...new Set(allRows.filter((r) => !r.proj && r.pid != null).map((r) => String(r.pid)))]
+      .filter((pid) => !lookups.projects[pid] && !recentlyFailed('projects', pid));
+    await mapConcurrent(pidsToFetch, CONCURRENCY, async (pid) => {
+      try {
+        const p = await getProject(sessionId, pid);
+        lookups.projects[pid] = { Name: p.Name || null, Location: p.Location || null };
+      } catch (e) {
+        lookups.failed.projects[pid] = new Date().toISOString();
+        log(`WARN history: GetProject(${pid}) failed: ${e.message}`);
+      }
+    });
+    for (const r of allRows) {
+      if (r.proj || r.pid == null) continue;
+      const p = lookups.projects[String(r.pid)] || projectFallbackByID.get(String(r.pid));
+      if (p) { r.proj = p.Name || null; r.loc = r.loc || p.Location || null; }
+    }
+    writeJson(HISTORY_LOOKUPS_JSON, lookups);
+
+    // Write each day: existing file rows + newly seen rows, keyed by task id
+    // so it only ever grows. A NEW past day that had tasks it couldn't
+    // resolve this run (an API hiccup) isn't written at all, so it stays
+    // "missing" and gets another try next run instead of being recorded as a
+    // finished-but-short day; re-derived days just add whatever they found.
+    let wroteDays = 0, wroteRows = 0, retryDays = 0;
+    const datesToWrite = new Set([...rowsByDate.keys(), ...[...derive]]);
+    for (const d of datesToWrite) {
+      const isNewDay = !haveDates.has(d);
+      if (isNewDay && d !== today && (omittedByDate.get(d) || 0) > 0) { retryDays++; continue; }
+      const existing = haveDates.has(d) ? readHistoryDay(d) : null;
+      const byId = new Map();
+      if (existing && Array.isArray(existing.rows)) for (const h of existing.rows) byId.set(String(h.id), h);
+      for (const r of (rowsByDate.get(d) || [])) {
+        const prev = byId.get(String(r.id));
+        // Keep a previously-resolved name/project if this run couldn't resolve it.
+        const merged = toHistoryRow(r);
+        if (prev) { for (const k of ['user', 'proj', 'loc']) if (!merged[k] && prev[k]) merged[k] = prev[k]; }
+        byId.set(String(r.id), merged);
+      }
+      const rows = [...byId.values()].sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+      writeHistoryDay(d, { date: d, derivedAt: new Date().toISOString(), rows });
+      wroteDays++; wroteRows += rows.length;
+    }
+    log(`History: ${wroteDays} day file(s) written (${wroteRows} rows) - today plus ${derive.size} re-derived/backfilled day(s)` +
+      (retryDays ? `; ${retryDays} new day(s) deferred (unresolved tasks, will retry)` : '') +
+      (missingRemaining ? `; ${missingRemaining} older day(s) still to backfill toward the last ${HISTORY_DAYS} days` : '') + '.');
+  }
+
   const tookSeconds = Math.round((Date.now() - startedAt) / 1000);
   log(`Done in ${tookSeconds}s.`);
   return { snapshot, tookSeconds };
 }
 
-module.exports = { runCollector };
+module.exports = {
+  runCollector, readHistoryRange, isValidDateStr, listDates, addDays, easternToday, listHistoryDates,
+  createCompletedSummary, HISTORY_MAX_RANGE_DAYS
+};
 
 if (require.main === module) {
   if (process.argv[2] === '--fetch-report-tables') {

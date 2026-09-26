@@ -115,6 +115,37 @@ curl -s -u 'DASHBOARD_USER:DASHBOARD_PASSWORD' -X POST https://your-app-url/refr
 Replace the URL and credentials with your actual values. Only set this up if
 you want it - the dashboard works fine with manual refreshes only.
 
+## 7. Completed-task history (Day / Range view)
+
+The **Completed today** panel has a **Period** selector: **Today** (live),
+**Day** (one date, plus the list of individual reviews completed that day), and
+**Range** (summary counts for a date range, with quick "Last 7 days / Last 30
+days / This month" buttons).
+
+This works from small per-day files the collector saves in a
+`workload-history/` folder next to the other cache files (one
+`YYYY-MM-DD.json` per day, roughly 100-150 KB each). Nothing to set up - the
+folder is created automatically, and each refresh:
+
+- adds the day's completions to today's file (a day's file only ever grows),
+- re-checks the last 14 days (a just-closed workflow's tasks can take a while
+  to show up in ProjectDox's historical tables), and
+- backfills a few older missing days toward the last 90, so history fills in
+  over the first several refreshes after this is deployed instead of making
+  one refresh very long.
+
+Days that haven't been backfilled yet are flagged in the panel ("N days in
+this range have no recorded history yet") rather than shown as zero.
+
+Optional environment variables (defaults shown):
+
+| Name | Default | Meaning |
+|---|---|---|
+| `HISTORY_DAYS` | `90` | How far back the collector keeps backfilling |
+| `HISTORY_MAX_NEW_DAYS_PER_RUN` | `3` | How many older missing days to backfill per refresh |
+
+Requires the updated `server.js` too (it serves the `/history` endpoint).
+
 ## Troubleshooting
 
 - **App won't start / 503 errors:** cPanel's Node.js app page has a link to
