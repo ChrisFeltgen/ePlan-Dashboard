@@ -1,0 +1,13 @@
+{
+  "name": "review-workload-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "City of Pompano Beach Building Department - ProjectDox review workload dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

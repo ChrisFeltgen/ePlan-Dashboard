@@ -1,0 +1,1929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ePlan Review Workload Dashboard</title>
+<script>
+  // Applies a saved light/dark override (if any) before the page paints, so
+  // switching to the non-system theme doesn't flash the system-default theme
+  // first and then jump - this has to run this early (before <style> is even
+  // parsed doesn't matter, but before first paint does), not from the main
+  // script down in <body>, which only runs after the whole page has loaded.
+  (function () {
+    try {
+      var saved = localStorage.getItem('ePlanDashboardTheme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    } catch (e) {}
+  })();
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    /* Surfaces/text/page-plane match pompanobeachfl.gov's own light theme
+       (confirmed live: body #f4f4f4, near-black text #1a1819). */
+    --surface-1:      #ffffff;
+    --page-plane:      #f4f4f4;
+    --text-primary:    #1a1819;
+    --text-secondary:  #4a5a63;
+    --text-muted:      #7c8a90;
+    --gridline:        #e2e6e8;
+    --baseline:        #c7ced1;
+    --border:          rgba(26,24,25,0.12);
+    /* Chart data-encoding colors - unchanged from the validated dataviz
+       palette. Branding applies to page chrome, not the accessibility-tested
+       category colors. */
+    --series-pending:  #2a78d6; /* categorical slot 1 - blue */
+    --series-accepted: #1baf7a; /* categorical slot 3 - aqua */
+    --success-text:    #006300;
+    --status-critical: #d03b3b; /* reserved status color - overdue flag, never a category */
+    --status-warning:  #a15c00; /* reserved status color - due today/soon flag */
+    /* City of Pompano Beach brand colors, confirmed live from
+       pompanobeachfl.gov (buttons, header bands, sidebar headers, links all
+       use rgb(42,118,141); the bright cyan accent is rgb(0,157,194)). Used
+       for UI chrome - buttons, active states, links, header - not chart data. */
+    --brand-primary:       #2a768d;
+    --brand-primary-hover: #1a5c6e;
+    --brand-accent:        #009dc2;
+    --card-shadow:     0 1px 3px rgba(26,24,25,0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page-plane:      #0d0d0d;
+      --text-primary:    #ffffff;
+      --text-secondary:  #c3c2b7;
+      --text-muted:      #898781;
+      --gridline:        #2c2c2a;
+      --baseline:        #383835;
+      --border:          rgba(255,255,255,0.10);
+      --series-pending:  #3987e5;
+      --series-accepted: #199e70;
+      --success-text:    #0ca30c;
+      --status-critical: #e66767;
+      --status-warning:  #d99a3d;
+      --brand-primary:       #4a94ab;
+      --brand-primary-hover: #5ea8bf;
+      --brand-accent:        #33b8d9;
+      --card-shadow:     0 1px 2px rgba(0,0,0,0.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page-plane:      #0d0d0d;
+    --text-primary:    #ffffff;
+    --text-secondary:  #c3c2b7;
+    --text-muted:      #898781;
+    --gridline:        #2c2c2a;
+    --baseline:        #383835;
+    --border:          rgba(255,255,255,0.10);
+    --series-pending:  #3987e5;
+    --series-accepted: #199e70;
+    --success-text:    #0ca30c;
+    --status-critical: #e66767;
+    --status-warning:  #d99a3d;
+    --brand-primary:       #4a94ab;
+    --brand-primary-hover: #5ea8bf;
+    --brand-accent:        #33b8d9;
+    --card-shadow:     0 1px 2px rgba(0,0,0,0.4);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--page-plane);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body { padding: 16px; max-width: 1600px; margin: 0 auto; }
+
+  header {
+    margin: -16px -16px 20px; padding: 16px;
+    background: var(--brand-primary); border-bottom: 3px solid var(--brand-accent);
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+  }
+  .header-brand { display: flex; align-items: center; gap: 16px; }
+  .theme-toggle-btn {
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 36px; height: 36px; border-radius: 50%; margin-top: 2px;
+    background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.35); color: #fff;
+    cursor: pointer;
+  }
+  .theme-toggle-btn:hover { background: rgba(255,255,255,0.28); }
+  .theme-toggle-btn svg { width: 18px; height: 18px; display: block; }
+  .brand-logo {
+    height: 52px; width: auto; flex-shrink: 0; background: #fff; border-radius: 8px;
+    padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  header h1 { color: #fff; }
+  header .meta { color: rgba(255,255,255,0.85); }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+  .meta { font-size: 13px; color: var(--text-secondary); }
+  .stale-badge {
+    font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+    background: #fab21933; color: #a86a00;
+  }
+  @media (prefers-color-scheme: dark) { .stale-badge { color: #fab219; } }
+
+  .refresh-btn {
+    font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 6px;
+    border: 1px solid var(--brand-primary); background: var(--brand-primary); color: #fff;
+    cursor: pointer;
+  }
+  .refresh-btn:hover:not(:disabled) { background: var(--brand-primary-hover); border-color: var(--brand-primary-hover); }
+  .refresh-btn:disabled { opacity: 0.6; cursor: default; }
+  .refresh-btn.error { background: #d03b3b; border-color: #d03b3b; }
+  /* No color override here - #refreshStatus already has class="meta" and
+     sits inside the always-teal header band, so it should use the same
+     near-white color as the rest of the header text (`header .meta` below)
+     regardless of light/dark mode. It previously pinned to --text-muted,
+     a theme color meant for body text on the page's own surface - in dark
+     mode that's a muted gray-brown with poor contrast against the teal
+     header, which is what made it "look poor in dark mode". */
+  /* One color, no light/dark split - the header band itself is always the
+     same teal regardless of site theme, so what needs good contrast here is
+     "bright green on teal," which doesn't change between modes. */
+  #refreshStatus.done { color: #7fe8a3; font-weight: 600; }
+  #refreshStatus.done .refresh-check { margin-right: 3px; }
+
+  .spinner {
+    display: inline-block; width: 11px; height: 11px; margin-right: 7px;
+    border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%;
+    animation: refresh-spin 0.8s linear infinite; vertical-align: -1.5px;
+  }
+  @keyframes refresh-spin { to { transform: rotate(360deg); } }
+
+  .refresh-log-toggle {
+    background: none; border: none; color: rgba(255,255,255,0.8); text-decoration: underline;
+    cursor: pointer; font-size: 12px; padding: 0;
+  }
+  .refresh-log-toggle:hover { color: #fff; }
+  .refresh-log-panel {
+    margin-top: 8px; padding: 8px 10px; background: rgba(0,0,0,0.25); border-radius: 6px;
+    max-height: 160px; overflow-y: auto; font-family: ui-monospace, Consolas, monospace;
+    font-size: 11px; color: rgba(255,255,255,0.9); line-height: 1.6;
+  }
+  .refresh-log-panel .log-line { white-space: pre-wrap; word-break: break-word; }
+  .refresh-log-panel .log-time { color: rgba(255,255,255,0.5); margin-right: 6px; }
+
+  .stat-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin: 16px 0 24px;
+  }
+  .stat-tile {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; box-shadow: var(--card-shadow);
+  }
+  /* A colored circle per stat, same reserved status hues as everywhere else
+     in the app (pending/accepted/overdue) - gives each tile a visual anchor
+     instead of being plain stacked text, and the color reinforces which
+     category it is before you even read the label. */
+  .stat-icon {
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 40px; height: 40px; border-radius: 50%;
+  }
+  .stat-icon svg { width: 20px; height: 20px; }
+  .stat-icon.neutral { background: var(--page-plane); color: var(--brand-primary); }
+  .stat-icon.pending { background: #2a78d61a; color: var(--series-pending); }
+  .stat-icon.accepted { background: #1baf7a1a; color: var(--series-accepted); }
+  .stat-icon.overdue { background: #d03b3b1a; color: var(--status-critical); }
+  .stat-text { min-width: 0; }
+  .stat-label { font-size: 12.5px; color: var(--text-secondary); margin-bottom: 4px; }
+  .stat-value { font-size: 28px; font-weight: 600; line-height: 1.1; }
+  .stat-value.pending { color: var(--series-pending); }
+  .stat-value.accepted { color: var(--series-accepted); }
+  .stat-value.overdue { color: #d03b3b; }
+  @media (prefers-color-scheme: dark) { .stat-value.overdue { color: #e66767; } }
+
+  /* No card of its own - this now lives inside .task-workload-panel, which
+     already provides the surface/border/shadow, so a second nested card here
+     would just be card-within-card clutter. A bottom rule is enough to mark
+     where the controls end and the workflow list they govern begins. */
+  .controls {
+    display: flex; flex-direction: column; gap: 10px;
+    margin-bottom: 14px; padding-bottom: 14px;
+    border-bottom: 1px solid var(--gridline);
+  }
+  .controls-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  /* A light rule between the filter row and the toggle row, and each toggle
+     group gets its own left divider (skipping the first) - three separate
+     button groups (Tasks/Sort/View) sitting edge to edge with only 16px of
+     gap read as one crowded cluster; a hairline between them makes each
+     group's boundary obvious without needing more space. */
+  .controls-row-toggles { padding-top: 10px; border-top: 1px solid var(--gridline); }
+  .controls-row-toggles .sort-toggle { padding-left: 16px; border-left: 1px solid var(--gridline); }
+  .controls-row-toggles .sort-toggle:first-child { padding-left: 0; border-left: none; }
+  /* The dividers and right-push only make sense on one wide row; once
+     narrow screens wrap each group onto its own line (below), a divider
+     hanging at the start of a wrapped line and a large gap shoving the last
+     group away from the others both look like layout mistakes rather than
+     grouping. */
+  @media (max-width: 900px) {
+    .controls-row-toggles .sort-toggle { padding-left: 0; border-left: none; }
+    .controls-row-toggles .controls-push-right { margin-left: 0; }
+  }
+  .controls input[type="search"] {
+    flex: 1 1 200px; min-width: 160px; padding: 7px 10px; font-size: 14px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--page-plane); color: var(--text-primary);
+  }
+  .controls label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .view-toggle { display: flex; gap: 4px; align-items: center; }
+  .view-toggle button {
+    font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--page-plane); color: var(--text-secondary); cursor: pointer;
+  }
+  .view-toggle button.active { background: var(--brand-primary); color: #fff; border-color: var(--brand-primary); }
+  .controls-push-right { margin-left: auto; }
+  .sort-toggle-label { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .swatch.pending { background: var(--series-pending); }
+  .swatch.accepted { background: var(--series-accepted); }
+
+  /* Task Workload wraps its controls + every workflow subsection in ONE
+     outer card - the whole area should read as one continuous functional
+     surface, not a stack of separate cards. */
+  .task-workload-panel {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; box-shadow: var(--card-shadow); margin-bottom: 20px;
+  }
+  .task-workload-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  /* Same badge treatment as .completed-check-icon in the Completed Today
+     panel above it (32px circle, tinted) so the two panel headers read as a
+     matched pair - brand teal here instead of the "done" green there, since
+     this panel isn't itself a completion state. */
+  .task-workload-icon {
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--page-plane); color: var(--brand-primary);
+  }
+  .task-workload-icon svg { width: 18px; height: 18px; }
+  .task-workload-title { font-size: 19px; font-weight: 700; margin: 0; }
+  .task-workload-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+
+  /* Each workflow is a subsection WITHIN .task-workload-panel, not its own
+     card - a border-top rule (skipped on the first) is enough to separate
+     one workflow's rows from the next; no background/shadow/radius of its
+     own, which is what made a page of several workflows read as a stack of
+     duplicate cards instead of one workload area. */
+  /* 8px horizontal padding, not 0 - .group-block/.group-col-header below use
+     a -8px negative margin (so their hover background can bleed toward this
+     section's edge without a gap), and this section has no padding of its
+     own to absorb that anymore now that it's a subsection instead of an
+     independent card. Without it, -8px reached 8px past this element's own
+     box; with overflow-x:auto still in place from the old per-card design,
+     that turned into an actual (empty, useless) horizontal scrollbar on
+     every workflow section rather than the harmless bleed it used to be. */
+  .template-section {
+    padding: 16px 8px 4px;
+  }
+  .template-section:first-child { padding-top: 4px; }
+  .template-section + .template-section { border-top: 1px solid var(--gridline); }
+  .template-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; margin: 0 0 10px; letter-spacing: -0.01em; }
+  .template-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--brand-primary); }
+  .template-icon svg { width: 17px; height: 17px; display: block; }
+  /* Indents the department rows under the workflow title (Workflow -> Group
+     hierarchy). 24px, not e.g. 16px - .group-block/.group-col-header/
+     .detail-panel below still carry their own -8px negative margin (for the
+     same edge-to-edge hover bleed as elsewhere), which eats 8px of whatever
+     padding is set here, so 24px nets a visible 16px indent rather than
+     landing back at the un-indented baseline. Right side is untouched (0)
+     so that edge stays exactly where .template-section's own padding
+     already puts it - safe from the horizontal-scrollbar bug fixed above. */
+  .template-groups { padding-left: 24px; }
+  @media (max-width: 900px) { .template-groups { padding-left: 16px; } }
+  .template-sub { font-size: 12.5px; color: var(--text-muted); font-weight: 400; margin-left: 8px; }
+
+  /* Completed-today panel: who completed what today, sliced by workflow,
+     group, or reviewer - answers that question directly instead of
+     requiring someone to open each department one at a time. Processing
+     (Review Coordinator/Submissions routing tasks - internal field/class
+     names still say "Operations" and cls="ops") is split from actual
+     review-group work ("Reviews" in the UI, cls="review") so routing
+     overhead doesn't dilute the review-group breakdown; the split reuses
+     the same pending/accepted colors as the rest of the app (blue =
+     Processing, green = Reviews) purely as a two-way encoding, not a status
+     color. */
+  .completed-panel {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; box-shadow: var(--card-shadow); margin-bottom: 20px;
+  }
+  .completed-panel-header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: flex-start; }
+  .completed-panel-title-wrap { display: flex; align-items: center; gap: 12px; }
+  .completed-check-icon {
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: #1baf7a1a; color: var(--series-accepted);
+  }
+  .completed-check-icon svg { width: 18px; height: 18px; }
+  .completed-panel-title { font-size: 19px; font-weight: 700; margin: 0; }
+  .completed-panel-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+  .completed-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .completed-panel-body { margin-top: 10px; }
+
+  /* Chevron leads the row (not a decorative icon box) - it's the actual
+     expand/collapse affordance, so it belongs where the eye starts reading,
+     and there's nothing else in the row competing for that first slot. */
+  .completed-workflow-row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 8px; margin: 0 -8px;
+    border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+  }
+  .completed-workflow-row:hover { background: var(--page-plane); }
+  .completed-workflow-row:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: -2px; }
+  .completed-workflow-row.open { background: var(--page-plane); border-color: var(--border); border-bottom-color: transparent; border-radius: 6px 6px 0 0; }
+  .completed-chevron { flex-shrink: 0; color: var(--text-muted); transition: transform 0.15s; }
+  .completed-chevron svg { width: 15px; height: 15px; display: block; }
+  .completed-workflow-row.open .completed-chevron { transform: rotate(90deg); color: var(--brand-primary); }
+  .completed-workflow-name-wrap { flex: 1 1 auto; min-width: 0; }
+  .completed-workflow-name { font-weight: 700; font-size: 14px; }
+  /* The completed count is the actual finding of this row ("how much got
+     done"), so it gets its own visual weight instead of trailing off as
+     muted text the way a secondary annotation would. */
+  .completed-workflow-count { font-weight: 700; color: var(--series-accepted); font-size: 13.5px; margin-left: 8px; }
+  /* No progress bar here anymore (dropped after it proved fragile - a flex
+     item's default min/flex-shrink behavior around variable-length text
+     resolves slightly differently per browser, so the same row rendered a
+     different bar width in Firefox vs Chrome depending on that row's own
+     workflow-name length). The legend alone doesn't have that problem - it
+     just sizes to its own content and sits flush right, since name-wrap
+     above absorbs all the slack space. */
+  .completed-workflow-legend { display: flex; flex: 0 0 auto; gap: 10px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+  .completed-workflow-legend .legend-item { display: flex; align-items: center; gap: 5px; }
+  .completed-workflow-legend b { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+  @media (max-width: 900px) {
+    .completed-workflow-row { flex-wrap: wrap; }
+    .completed-workflow-legend { flex: 1 1 100%; order: 3; padding-left: 25px; gap: 16px; }
+  }
+
+  /* Same -8px full-bleed margin as .completed-workflow-row.open above it, so
+     the two share exact left/right edges instead of the detail panel's
+     border sitting narrower than the row it's attached to. */
+  .completed-detail { padding: 12px 12px 14px; border: 1px solid var(--border); border-top: none; border-radius: 0 0 6px 6px; margin: 0 -8px 4px; }
+  .completed-bucket { margin-bottom: 16px; }
+  .completed-bucket:last-child { margin-bottom: 0; }
+  .completed-detail-col-title {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0 0 6px;
+  }
+  /* One row per group: its own bar/count on the left, its own reviewers
+     inline on the right - no separate aggregate "who worked today" pool and
+     no click-to-reveal, since the group -> people relationship is the whole
+     point and shouldn't be hidden behind a toggle.
+     A single CSS Grid across the whole list (not each row sized on its own)
+     is what makes the name/bar/count columns actually line up - the name
+     column's width is the widest name in the WHOLE list, computed once, so
+     every row's bar starts at the same x. Each row is a "display:contents"
+     wrapper: it exists for the JS/CSS below to address as a unit, but
+     contributes no box of its own, so its 4 children become direct items of
+     the grid instead of nested inside a flex/grid container of their own -
+     deliberately avoiding that nesting after it caused a real Chrome/Firefox
+     split elsewhere on this page (a flex item that's also a flex container,
+     auto-sized off its own children, measured differently in each engine).
+     Grid column tracks don't carry that ambiguity - max-content and 1fr are
+     both single, well-defined algorithms, not a negotiation between item and
+     container the way nested flex auto-basis is. */
+  .completed-group-grid { display: grid; grid-template-columns: max-content 110px 32px 1fr; column-gap: 10px; row-gap: 10px; align-items: center; }
+  .completed-member-row { display: contents; }
+  .completed-mini-name { font-size: 12.5px; color: var(--text-primary); white-space: nowrap; }
+  .completed-mini-bar { width: 110px; height: 6px; background: var(--page-plane); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .completed-mini-bar-fill { display: block; height: 100%; }
+  .completed-mini-bar-fill.ops { background: var(--series-pending); }
+  .completed-mini-bar-fill.review { background: var(--series-accepted); }
+  .completed-mini-count { text-align: right; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* position:relative so the task-breakdown popover (below) can anchor
+     itself to this cell with position:absolute, overlaying whatever's below
+     instead of pushing it down - opening one person's breakdown shouldn't
+     reflow every row underneath it. */
+  .completed-member-chips { min-width: 0; position: relative; }
+  /* Below 900px there isn't room for 4 aligned columns plus a name that
+     might be "Engineering Department" - stack each row's pieces instead of
+     forcing them into a cramped grid. Reverting .completed-member-row to a
+     normal block re-enables its children's default top-to-bottom block flow
+     (they're plain divs), no separate mobile markup needed. */
+  @media (max-width: 900px) {
+    .completed-group-grid { display: block; }
+    .completed-member-row { display: block; padding: 8px 0; }
+    .completed-member-row + .completed-member-row { border-top: 1px solid var(--gridline); }
+    .completed-mini-bar { width: auto; margin: 4px 0; }
+    .completed-mini-count { display: inline-block; margin-left: 8px; }
+  }
+  /* Staff tab (View by: Staff): Processing and Reviews are kept as two
+     separate lists, not merged into one count-sorted list - a coordinator
+     who closed 300 routing tasks and a reviewer who closed 15 technical
+     reviews aren't doing comparable work, so ranking them against each
+     other in one list was misleading. */
+  .completed-staff-section { margin-bottom: 18px; }
+  .completed-staff-section:last-child { margin-bottom: 0; }
+
+  /* Pills carry a subtle tint matching their bucket's color (blue for
+     Operations, green for Reviewers) so which list you're looking at is
+     still obvious even scrolled past the section heading - the count leads
+     each pill since that's the number being scanned, not the name. */
+  .completed-people-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .completed-person-chip {
+    display: flex; align-items: center; gap: 6px; font-size: 12px;
+    border: 1px solid transparent; border-radius: 17px; padding: 3px 9px 3px 4px;
+  }
+  .completed-person-chip.ops { background: #2a78d614; border-color: #2a78d633; }
+  .completed-person-chip.review { background: #1baf7a14; border-color: #1baf7a33; }
+  /* Sized and weighted up from the original 16px/10.5px - at that size the
+     number was legible in isolation but read as a blur of color in a row of
+     several chips. Dark-on-tint (not white) for the green variant is
+     deliberate, not an inconsistency with the blue variant's white-on-tint:
+     white on a green this saturated measures poorly, while dark text on a
+     lighter green reads cleanly - hence the lighter #7ce0b3 fill here
+     instead of the same --series-accepted green used for bars/swatches
+     (dark text on THAT green already passed WCAG AA at ~5:1, but this
+     lighter tint pushes it closer to ~9:1, and reads as a visibly distinct,
+     brighter chip against the chip's own pale background). */
+  .completed-person-count {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+    font-weight: 800; font-size: 12px; line-height: 1;
+  }
+  .completed-person-chip.ops .completed-person-count { background: var(--series-pending); color: #fff; }
+  .completed-person-chip.review .completed-person-count { background: #7ce0b3; color: #06331d; }
+
+  /* Operations chips only (Review Coordinator/Submissions) are clickable -
+     a single group total there can hide several distinct routing steps by
+     the same person, which the popover below breaks out by task name. */
+  .completed-person-chip.clickable { cursor: pointer; }
+  .completed-person-chip.clickable:hover { border-color: #2a78d666; }
+  .completed-person-chip.clickable:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: 1px; }
+  .completed-person-chip.clickable.active { border-color: var(--series-pending); box-shadow: 0 0 0 1px var(--series-pending); }
+
+  /* Floats over whatever's below (position:relative on .completed-member-chips
+     is the anchor) instead of pushing the rest of the list down - opening one
+     person's breakdown shouldn't reflow every row underneath it. */
+  .completed-task-popover {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+    width: min(420px, 90vw);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25); padding: 12px 14px;
+  }
+  .completed-task-popover-header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gridline);
+  }
+  .completed-task-popover-title { font-weight: 700; font-size: 13.5px; color: var(--text-primary); }
+  .completed-task-popover-total { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .completed-task-popover-total b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .completed-task-popover-grid {
+    display: grid; grid-template-columns: max-content 26px 1fr;
+    column-gap: 10px; row-gap: 7px; align-items: center;
+  }
+  .completed-task-popover-name { font-size: 12.5px; color: var(--text-secondary); white-space: nowrap; }
+  .completed-task-popover-count { text-align: right; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* Overrides .completed-mini-bar's fixed 110px - here the bar sits in a 1fr
+     grid track and should fill it, not repeat the fixed width meant for the
+     name/bar/count columns elsewhere on the page. */
+  .completed-task-popover-grid .completed-mini-bar { width: 100%; }
+  @media (max-width: 900px) {
+    .completed-task-popover { position: static; width: auto; margin-top: 8px; box-shadow: none; }
+  }
+
+  .completed-flat-row {
+    display: flex; align-items: center; gap: 12px; padding: 9px 8px; margin: 0 -8px; border-radius: 6px;
+  }
+  .completed-flat-row:hover { background: var(--page-plane); }
+  .completed-flat-row + .completed-flat-row { border-top: 1px solid var(--gridline); }
+  .completed-flat-main { flex: 1 1 220px; min-width: 0; }
+  .completed-flat-title { font-weight: 600; font-size: 13.5px; }
+  .completed-flat-sub { font-size: 12px; color: var(--text-muted); }
+  .completed-flat-badge {
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    color: var(--series-pending); background: #2a78d61a; border-radius: 4px; padding: 1px 6px; margin-left: 6px;
+  }
+  .completed-flat-bar { flex: 1 1 140px; max-width: 220px; }
+  .completed-flat-count { flex: 0 0 32px; text-align: right; font-weight: 700; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+  .completed-flat-people { flex: 1 1 260px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .completed-flat-more {
+    font-size: 12px; font-weight: 600; color: var(--brand-primary); background: none; border: none;
+    cursor: pointer; padding: 0; white-space: nowrap; text-decoration: underline;
+  }
+  @media (max-width: 900px) {
+    .completed-flat-row { flex-wrap: wrap; }
+    .completed-flat-bar { order: 4; flex: 1 1 100%; max-width: none; }
+    .completed-flat-people { order: 5; flex: 1 1 100%; }
+  }
+
+  .completed-panel-footer {
+    display: flex; flex-wrap: wrap; gap: 6px 16px; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--text-muted); margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--gridline);
+  }
+
+  /* Column-aligned layout: name / open count / status breakdown / progress
+     bar / oldest-waiting, each group a single grid row instead of a stacked
+     two-line block. Same column template on the header row below so labels
+     line up with their column exactly. */
+  .group-grid-cols { grid-template-columns: minmax(150px, 1.2fr) 60px minmax(210px, 1.4fr) minmax(140px, 1.6fr) 112px; }
+  .group-col-header {
+    display: grid; column-gap: 14px; align-items: center;
+    padding: 0 8px 6px; margin: 0 -8px 4px;
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--text-muted); border-bottom: 1px solid var(--gridline);
+  }
+  .group-col-header .num { text-align: right; }
+  .group-block {
+    display: grid; column-gap: 14px; align-items: center;
+    padding: 9px 8px; margin: 0 -8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+  }
+  .group-block:hover { background: var(--page-plane); }
+  .group-block:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: -2px; }
+  .group-block + .group-block { border-top: 1px solid var(--gridline); }
+  /* When expanded, the row becomes the detail panel's header: same
+     background/border as the panel, flush against it with no bottom border
+     of its own, so the two read as one connected block instead of a row
+     with an unrelated card floating below it. */
+  .group-block.open {
+    background: var(--page-plane); border-color: var(--border); border-bottom-color: transparent;
+    border-radius: 6px 6px 0 0;
+  }
+  .group-name { display: flex; align-items: center; gap: 7px; font-weight: 600; color: var(--text-primary); font-size: 13.5px; }
+  /* Reuses .completed-chevron's own sizing/color/transition (same expand
+     affordance as Completed Today's workflow rows, for visual consistency
+     between the two lists) - only the open-state rotation hook needs its
+     own selector, since it toggles on .group-block.open here rather than
+     .completed-workflow-row.open. */
+  .group-block.open .group-chevron { transform: rotate(90deg); color: var(--brand-primary); }
+  .group-open-cell { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+  /* Same status colors as the bar beside it (and the legend/stat tiles
+     above) - pending/accepted/overdue read as the same categories at a
+     glance instead of this line being flat, uncolored prose next to a
+     colorful bar. */
+  /* Wraps rather than truncates - with completed-today as a possible 4th
+     segment, nowrap+ellipsis was silently hiding it on some rows instead of
+     just taking a second line. */
+  .group-breakdown-cell { font-size: 12.5px; color: var(--text-secondary); white-space: normal; line-height: 1.4; }
+  .group-breakdown-cell .n-pending, .group-breakdown-cell .n-accepted, .group-breakdown-cell .n-overdue {
+    font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .n-pending { color: var(--series-pending); }
+  .n-accepted { color: var(--series-accepted); }
+  .n-overdue { color: var(--status-critical); font-weight: 700; }
+  .n-completed { color: var(--text-muted); font-weight: 700; }
+  /* Below ~700px the 5-column grid (150-1200px+ of minimums) can't fit -
+     it was silently overflowing sideways, cutting the department name and
+     pushing Progress/Oldest Waiting off-screen with no scroll affordance,
+     leaving just a ragged-looking Open number + breakdown text. Stack into
+     a single column instead of trying to force columns into a narrow
+     screen - same DOM order already reads top-to-bottom in a sensible
+     order (name, then open count, then breakdown, then bar, then oldest). */
+  @media (max-width: 900px) {
+    .group-col-header { display: none; }
+    .group-block.group-grid-cols { display: block; padding: 10px 8px; }
+    .group-name { margin-bottom: 3px; }
+    .group-open-cell {
+      display: inline-block; text-align: left; font-size: 12.5px; font-weight: 400;
+      color: var(--text-secondary); margin-bottom: 2px;
+    }
+    .group-open-cell::after { content: ' open'; }
+    .group-breakdown-cell { display: block; margin-bottom: 8px; }
+    .bar-track { display: block; margin-bottom: 8px; }
+    .group-oldest-cell { display: block; }
+  }
+  /* Oldest-waiting as a severity pill, not plain muted text - color-coded
+     with the same reserved status hues used everywhere else (never a new
+     hue), so a badly stuck item (weeks/months waiting) is scannable at a
+     glance across a long list instead of requiring reading every number. */
+  .oldest-pill {
+    display: inline-block; font-size: 12px; font-weight: 700; white-space: nowrap;
+    padding: 3px 9px; border-radius: 10px; font-variant-numeric: tabular-nums;
+  }
+  .oldest-pill.oldest-ok { background: #1baf7a1a; color: var(--series-accepted); }
+  .oldest-pill.oldest-warning { background: #a15c001a; color: var(--status-warning); }
+  .oldest-pill.oldest-critical { background: #d03b3b1a; color: var(--status-critical); }
+  .oldest-pill.oldest-none { background: var(--page-plane); color: var(--text-muted); }
+  /* A muted track background, not the more contrasting --gridline - the
+     unfilled portion is just scale headroom (bars are relative to the
+     busiest group, not this group's own total), not available capacity, so
+     it shouldn't read as an empty "slot" waiting to be filled. */
+  .bar-track { position: relative; height: 20px; background: var(--page-plane); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; cursor: pointer; }
+  /* Parent's border-radius + overflow:hidden clips the end segments, so
+     individual segments stay plain rectangles regardless of how many there are. */
+  .bar-seg { position: absolute; top: 0; bottom: 0; height: 100%; }
+  .bar-seg.pending { background: var(--series-pending); }
+  .bar-seg.accepted { background: var(--series-accepted); }
+  .bar-seg.overdue { background: var(--status-critical); }
+  .bar-total {
+    font-size: 13px; color: var(--text-secondary); text-align: right; font-variant-numeric: tabular-nums;
+  }
+
+  .tooltip {
+    position: fixed; pointer-events: none; z-index: 50;
+    background: var(--text-primary); color: var(--surface-1);
+    font-size: 12.5px; padding: 8px 10px; border-radius: 6px; max-width: 280px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25); display: none; line-height: 1.4;
+  }
+
+  .detail-panel {
+    display: none; margin-top: 10px; padding: 10px 12px;
+    background: var(--page-plane); border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; overflow-x: auto;
+  }
+  /* Flush against the .group-block.open row above it (same -8px full-bleed
+     margin, no top border/radius of its own) so the two form one connected
+     block - the row is its header, this is its body. */
+  .detail-panel.open {
+    display: block; margin-top: 0; margin-left: -8px; margin-right: -8px;
+    border-top: none; border-radius: 0 0 8px 8px;
+  }
+
+  /* Fixed layout with an explicit width on every column, including
+     Description - left unconstrained, it absorbed 100% of whatever space
+     the other columns didn't use, which on a wide monitor starved the date
+     columns down to truncating ("Sep 10, 2...") and even clipping the
+     OVERDUE badge itself. A generous fixed width keeps it comfortably
+     readable without swallowing the rest of the table. */
+  table.task-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12.5px; }
+  table.task-table th, table.task-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--gridline); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  table.task-table th { color: var(--text-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.02em; }
+  table.task-table th.sortable { cursor: pointer; user-select: none; }
+  table.task-table th.sortable:hover { color: var(--text-primary); }
+  table.task-table th.sort-active { color: var(--brand-primary); }
+  table.task-table tbody tr:last-child td { border-bottom: none; }
+  table.task-table td:first-child { white-space: normal; }
+  table.task-table col.col-project    { width: 110px; }
+  table.task-table col.col-cycle      { width: 118px; }
+  table.task-table col.col-desc       { width: 300px; }
+  table.task-table col.col-loc        { width: 180px; }
+  table.task-table col.col-status     { width: 76px; }
+  table.task-table col.col-assignee   { width: 116px; }
+  table.task-table col.col-date       { width: 96px; }
+  table.task-table col.col-due-narrow { width: 112px; }
+  .project-link { color: var(--brand-primary); text-decoration: none; font-weight: 600; }
+  .project-link:hover { color: var(--brand-primary-hover); text-decoration: underline; }
+  table.task-table td.cycle-cell { white-space: normal; }
+  .cycle-badge { font-size: 11px; font-weight: 600; color: var(--brand-primary); line-height: 1.3; }
+  .cycle-prev { font-size: 10.5px; color: var(--text-muted); line-height: 1.3; }
+  .cycle-prev-label { font-weight: 600; }
+  .cycle-none { color: var(--text-muted); }
+  /* white-space:normal lives on the td (needed so the cell can wrap at all),
+     but the line-clamp itself lives on an inner div, not the td - some
+     browsers drop a <td> out of normal table-cell layout when it's given
+     display:-webkit-box directly, which shifts every following cell in the
+     row out of alignment. The inner div can safely use it since it isn't
+     part of the table's own box structure. */
+  table.task-table td.desc-cell, table.task-table td.loc-cell {
+    white-space: normal; color: var(--text-secondary);
+  }
+  .clamp-2 {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; text-overflow: clip;
+  }
+  /* Never let the OVERDUE flag itself get clipped by the ellipsis rule above -
+     wrap the date and badge onto a second line instead if the column is tight. */
+  /* Both overdue and due-soon dates need the badge to be able to drop to its
+     own line below the date instead of getting clipped by the ellipsis rule
+     every other date column uses - only the overdue case also gets red text.
+     table.task-table td.due-cell (not bare .due-cell) to outrank the general
+     "table.task-table td" nowrap/ellipsis rule - a bare class selector lost
+     to it here the same way desc-cell/loc-cell did earlier in this file. */
+  table.task-table td.due-cell { white-space: normal; overflow: visible; text-overflow: clip; }
+  table.task-table td.due-cell.overdue-cell { color: #d03b3b; font-weight: 600; }
+  .overdue-tag, .due-soon-tag {
+    /* block + fit-content, not inline-block: inline-block only wraps to its
+       own line when it happens not to fit next to the date text, which
+       depends on that row's exact date-string width - "Oct 5, 2024" fits
+       beside the badge, "Nov 29, 2024" doesn't, so the badge only wrapped
+       on SOME rows. It's always meant to sit on its own line below the
+       date, so force that unconditionally; fit-content keeps the pill
+       sized to its text instead of stretching full-width like a plain block. */
+    display: block; width: fit-content; margin-top: 2px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 1px 5px; border-radius: 8px; white-space: nowrap;
+  }
+  .overdue-tag { background: #d03b3b1a; color: #d03b3b; }
+  .due-soon-tag { background: #a15c001a; color: var(--status-warning); }
+  /* Row-state tints, applied to at most one per row (overdue beats due-soon
+     beats accepted) - deliberately faint (a wash, not a fill) and paired
+     with a left border so the signal reads even for someone who can't
+     distinguish the hue, and so most rows (plain pending, not due soon)
+     stay uncolored rather than turning the whole table into a rainbow. */
+  table.task-table tr.overdue-row td { background: #d03b3b0f; }
+  table.task-table tr.overdue-row td:first-child { box-shadow: inset 3px 0 0 var(--status-critical); }
+  table.task-table tr.due-soon-row td { background: #a15c0012; }
+  table.task-table tr.due-soon-row td:first-child { box-shadow: inset 3px 0 0 var(--status-warning); }
+  table.task-table tr.accepted-row td { background: #1baf7a0f; }
+  table.task-table tr.accepted-row td:first-child { box-shadow: inset 3px 0 0 var(--series-accepted); }
+  /* Pre-assigned to one specific person (WFlowTaskAssignmentTypeID=1,
+     "Individual") but not yet formally Accepted - genuinely different from
+     a plain Pending task that's open to whoever in the group grabs it
+     first, so it gets its own color rather than reading as unclaimed. Uses
+     the brand accent cyan, not reused from pending/accepted/overdue/
+     completed, so it reads as its own category at a glance. */
+  table.task-table tr.assigned-row td { background: #009dc212; }
+  table.task-table tr.assigned-row td:first-child { box-shadow: inset 3px 0 0 var(--brand-accent); }
+  /* Completed-today rows - muted/faded rather than a bright status color,
+     since "done" isn't an action state the way pending/accepted/overdue
+     are; it shouldn't compete visually with the rows still needing
+     attention. */
+  table.task-table tr.completed-row td { opacity: 0.6; }
+  table.task-table tr.completed-row td:first-child { box-shadow: inset 3px 0 0 var(--text-muted); }
+
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 13.5px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  table.data-table th, table.data-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gridline); }
+  table.data-table th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; }
+  table.data-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.data-table tr:last-child td { border-bottom: none; }
+
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+  .error-state { text-align: center; padding: 40px 20px; color: #d03b3b; }
+
+  #app { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-brand">
+    <img src="copb-logo.png" alt="City of Pompano Beach" class="brand-logo">
+    <div>
+      <h1>ePlan Review Workload Dashboard</h1>
+      <div class="meta-row">
+        <span class="meta" id="generatedMeta">Loading...</span>
+        <span class="stale-badge" id="staleBadge" style="display:none;">Data may be stale</span>
+        <button id="refreshBtn" class="refresh-btn"><span class="spinner" id="refreshSpinner" style="display:none;"></span><span id="refreshBtnLabel">Refresh now</span></button>
+        <span class="meta" id="refreshStatus"></span>
+        <button id="refreshLogToggle" class="refresh-log-toggle" style="display:none;">Show details</button>
+      </div>
+      <div id="refreshLogPanel" class="refresh-log-panel" style="display:none;"></div>
+    </div>
+  </div>
+  <button id="themeToggleBtn" class="theme-toggle-btn" type="button" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
+</header>
+
+<div id="loadingState" class="empty-state">Loading workload-snapshot.json ...</div>
+<div id="errorState" class="error-state" style="display:none;"></div>
+
+<div id="app">
+  <div class="stat-row" id="statRow"></div>
+
+  <div id="completedTodayPanel" class="completed-panel" style="display:none;"></div>
+
+  <div class="task-workload-panel">
+    <div class="task-workload-header">
+      <div class="task-workload-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg></div>
+      <div>
+        <h2 class="task-workload-title">Task Workload</h2>
+        <div class="task-workload-sub">View and filter current, pending, accepted, overdue, and completed tasks</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="controls-row controls-row-filters">
+        <input type="search" id="searchBox" placeholder="Filter by review group...">
+        <input type="search" id="reviewerSearchBox" placeholder="Filter by reviewer name...">
+        <label><input type="checkbox" id="showApplicant"> Show self-service tasks (Applicant, Fee Group)</label>
+      </div>
+      <div class="controls-row controls-row-toggles">
+        <div class="view-toggle sort-toggle">
+          <span class="sort-toggle-label">Tasks:</span>
+          <button id="taskViewOpenBtn" class="active">Open</button>
+          <button id="taskViewWithCompletedBtn">+ Completed</button>
+          <button id="taskViewCompletedOnlyBtn">Completed only</button>
+          <button id="taskViewOverdueOnlyBtn">Overdue only</button>
+        </div>
+        <div class="view-toggle sort-toggle">
+          <span class="sort-toggle-label">Sort:</span>
+          <button id="sortByNameBtn" class="active">Name</button>
+          <button id="sortByTasksBtn">Most tasks</button>
+        </div>
+        <div class="view-toggle sort-toggle controls-push-right">
+          <span class="sort-toggle-label">View:</span>
+          <button id="chartViewBtn" class="active">Chart</button>
+          <button id="tableViewBtn">Table</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="chartView"></div>
+    <div id="tableView" style="display:none;"></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(function () {
+  var SNAPSHOT_URL = 'workload-snapshot.json';
+  var AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+  var STALE_AFTER_MIN = 60; // flag if the collector hasn't run in over an hour
+
+  var state = { data: null, view: 'chart', search: '', reviewerSearch: '', showApplicant: false, taskView: 'open', groupSort: 'name', completedView: 'workflow' };
+
+  var tooltip = document.getElementById('tooltip');
+  // A Set, not a single key: filtering by reviewer name auto-opens every
+  // group that has a matching task (see reviewerSearchBox's listener below),
+  // which only makes sense if more than one panel can be open at once.
+  var openPanelKeys = new Set();
+  // Tracks only the subset of openPanelKeys that the CURRENT reviewer search
+  // opened automatically (as opposed to a group the user clicked open by
+  // hand). Without this, switching from one name to another - or clearing
+  // the search - had no way to know which panels to close again, so they
+  // just accumulated across every search until nearly everything was open.
+  var reviewerAutoOpenKeys = new Set();
+
+  // Completed-today panel: which workflow rows are expanded - separate from
+  // openPanelKeys since this is a different panel with its own click target.
+  var completedOpenKeys = new Set();
+  // Group tab (View by: Group): which rows have had "+N more" clicked to
+  // reveal every contributor instead of just the top 4.
+  var completedGroupTabShowAllKeys = new Set();
+
+  // Preferred workflow display order - a supervisor's priority ranking, not
+  // alphabetical or by volume, used everywhere workflows are listed
+  // (Completed Today and Task Workload) so the two sections agree instead
+  // of independently landing on different orders. Matched by keyword since
+  // the full template names carry a "(ProjectFlow)" suffix; anything not
+  // named here sorts alphabetically after every named one, so a new
+  // workflow template shows up (at the end) instead of disappearing.
+  var WORKFLOW_ORDER_HINTS = ['building permit', 'zoning', 'bsip', 'private provider'];
+  function workflowOrderRank(name) {
+    var lower = (name || '').toLowerCase();
+    for (var i = 0; i < WORKFLOW_ORDER_HINTS.length; i++) {
+      if (lower.indexOf(WORKFLOW_ORDER_HINTS[i]) !== -1) return i;
+    }
+    return WORKFLOW_ORDER_HINTS.length;
+  }
+  function compareWorkflowNames(a, b) {
+    var ra = workflowOrderRank(a), rb = workflowOrderRank(b);
+    if (ra !== rb) return ra - rb;
+    return (a || '').localeCompare(b || '');
+  }
+
+  // Same keyword-priority pattern as WORKFLOW_ORDER_HINTS, for the task
+  // breakdown popover on an Operations chip - Prescreen/Begin Review/Review
+  // Complete/Resubmit Received/Batch Stamp is the order these steps actually
+  // happen in, not alphabetical or by count. Unlisted task names sort
+  // alphabetically after the named ones.
+  var TASK_ORDER_HINTS = ['prescreen', 'assign reviewers', 'begin review', 'review complete', 'resubmit received', 'batch stamp'];
+  function taskOrderRank(name) {
+    var lower = (name || '').toLowerCase();
+    for (var i = 0; i < TASK_ORDER_HINTS.length; i++) {
+      if (lower.indexOf(TASK_ORDER_HINTS[i]) !== -1) return i;
+    }
+    return TASK_ORDER_HINTS.length;
+  }
+  function compareTaskNames(a, b) {
+    var ra = taskOrderRank(a), rb = taskOrderRank(b);
+    if (ra !== rb) return ra - rb;
+    return (a || '').localeCompare(b || '');
+  }
+
+  // Which Operations-chip's task breakdown popover is open, if any (key:
+  // group-row-key::userKey) - a single value, not a Set, since only one
+  // popover makes sense open at a time.
+  var completedTaskPopoverKey = null;
+
+  // Matches the currently-assigned reviewer OR the "Last:" reviewer shown in
+  // the Rev/Cycle badge (t.PreviousReviewers[0], the most recent prior
+  // reviewer - same one the cell displays, not the full history) - a
+  // supervisor searching a name should find a task even if that person's
+  // work on it already finished and it moved on to someone else.
+  function taskMatchesReviewer(t, needle) {
+    if ((t.AssignedUserName || '').toLowerCase().indexOf(needle) !== -1) return true;
+    var prior = t.PreviousReviewers || [];
+    var lastName = prior.length ? (prior[0].UserName || '') : '';
+    return lastName.toLowerCase().indexOf(needle) !== -1;
+  }
+  function groupKey(templateName, groupName) { return (templateName || 'Unknown template') + '::' + groupName; }
+  // Shared across every group's task table (clicking a date header re-sorts
+  // all of them, not just the one you clicked in) - defaults to the
+  // collector's own earliest-due-first order until the user picks a column.
+  var taskSort = { field: 'DateDue', dir: 'asc' };
+
+  function fmtInt(n) { return (n || 0).toLocaleString(); }
+
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function projectDoxUrl(projectId) {
+    return 'https://pompanobeach-fl-us-projectdoxwebui.avolvecloud.com/Project/Index?ProjectID=' +
+      encodeURIComponent(projectId) + '&tab=tasksTab';
+  }
+
+  function isOverdue(task) {
+    if (!task.DateDue) return false;
+    return new Date(task.DateDue).getTime() < Date.now();
+  }
+
+  // "Overdue" always excludes Completed tasks - a finished task past its old
+  // due date isn't overdue, it's just done late. Shared by the overdue count
+  // badges and the "Overdue only" filter so both mean the same thing.
+  function isOverdueTask(t) { return isOverdue(t) && t.TaskStatus !== 'Completed'; }
+
+  function countOverdue(tasks) {
+    return (tasks || []).filter(isOverdueTask).length;
+  }
+
+  var DUE_SOON_DAYS = 3; // due today through this many days out counts as "approaching deadline"
+
+  function isDueSoon(task) {
+    if (!task.DateDue || task.TaskStatus === 'Completed') return false;
+    var dueTime = new Date(task.DateDue).getTime();
+    var now = Date.now();
+    if (dueTime < now) return false; // already overdue - handled as its own, higher-priority state
+    var daysUntil = (dueTime - now) / 86400000;
+    return daysUntil <= DUE_SOON_DAYS;
+  }
+
+  // At most one visual state per row, most urgent wins: completed > overdue >
+  // due-soon > accepted (in progress) > directly assigned (pre-assigned to
+  // one person, not yet accepted) > plain. Most rows (pending, not due soon)
+  // get no tint at all - only the ones that need attention or are actively
+  // worked.
+  function rowStateClass(t) {
+    if (t.TaskStatus === 'Completed') return 'completed-row';
+    if (isOverdue(t)) return 'overdue-row';
+    if (isDueSoon(t)) return 'due-soon-row';
+    if (t.TaskStatus === 'Accepted') return 'accepted-row';
+    if (t.TaskStatus === 'Pending' && t.IsDirectAssignment) return 'assigned-row';
+    return '';
+  }
+
+  function oldestWaitingDays(tasks) {
+    // Counts every open task regardless of status (Pending or Accepted) - the
+    // oldest task still open at all, not just the oldest unclaimed one. A
+    // Completed task isn't "waiting" any more regardless of how old its
+    // DateAssigned is, so those are excluded even though this list can also
+    // include tasks completed today.
+    var dated = (tasks || []).filter(function (t) { return t.DateAssigned && t.TaskStatus !== 'Completed'; });
+    if (!dated.length) return null;
+    var oldestMs = Math.min.apply(null, dated.map(function (t) { return new Date(t.DateAssigned).getTime(); }));
+    return Math.floor((Date.now() - oldestMs) / 86400000);
+  }
+
+  // Severity thresholds for the oldest-waiting pill - a bare number buried in
+  // a long list doesn't stand out, so color-code it: under a week is normal
+  // turnaround, 1-3 weeks is worth a look, 3+ weeks (some groups here run
+  // into the hundreds of days) is the ones actually worth chasing down.
+  function oldestWaitingPill(oldestDays) {
+    if (oldestDays === null) return '<span class="oldest-pill oldest-none">&mdash;</span>';
+    var cls = oldestDays >= 14 ? 'oldest-critical' : oldestDays >= 11 ? 'oldest-warning' : 'oldest-ok';
+    return '<span class="oldest-pill ' + cls + '">⏱ ' + oldestDays + (oldestDays === 1 ? ' day' : ' days') + '</span>';
+  }
+
+  function sortTasksBy(tasks, field, dir) {
+    var sign = dir === 'desc' ? -1 : 1;
+    return (tasks || []).slice().sort(function (a, b) {
+      var av = a[field] ? new Date(a[field]).getTime() : null;
+      var bv = b[field] ? new Date(b[field]).getTime() : null;
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;  // undated tasks sort last regardless of direction
+      if (bv === null) return -1;
+      return (av - bv) * sign;
+    });
+  }
+
+  function cleanDescription(s) {
+    // ProjectDox descriptions occasionally contain literal legacy markup
+    // (e.g. "<FONT COLOR='RED'>") as plain text, not real HTML - strip
+    // anything tag-shaped before display rather than showing it verbatim.
+    return (s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function renderCycleCell(t) {
+    // Each Revision (R0, R1, R2...) is its own workflow instance with its own
+    // independent Cycle counter - a re-review can mean either "same revision,
+    // later cycle" or "new revision, back to cycle 1" (in which case the
+    // relevant prior reviewer is the previous revision's last cycle, which
+    // the collector already resolved into PreviousReviewers either way).
+    var revision = t.Revision || 0;
+    var cycle = t.ReviewCycle || 1;
+    var isFirstEver = revision === 0 && cycle <= 1;
+    if (isFirstEver) return '<span class="cycle-none">&mdash;</span>';
+
+    var label = 'Rev ' + revision + ' / Cycle ' + cycle;
+    var prior = t.PreviousReviewers || [];
+    if (!prior.length) {
+      return '<div class="cycle-badge" title="Re-review - no prior reviewer found on record for this group">↻ ' + label + '</div>';
+    }
+    var last = prior[0]; // sorted most-recent (revision, then cycle) first by the collector
+    var lastName = last.UserName || ('User ' + last.UserID);
+    var fullHistory = prior.map(function (p) {
+      return 'R' + (p.Revision || 0) + '/C' + p.ReviewCycle + ': ' + (p.UserName || ('User ' + p.UserID)) + (p.DateCompleted ? ' (' + fmtDate(p.DateCompleted) + ')' : '');
+    }).join('\n');
+    return '<div class="cycle-badge" title="' + escapeHtml(fullHistory) + '">↻ ' + label + '</div>' +
+      '<div class="cycle-prev"><span class="cycle-prev-label">Last:</span> ' + escapeHtml(lastName) + '</div>';
+  }
+
+  function sortHeader(label, field) {
+    var active = taskSort.field === field;
+    var arrow = active ? (taskSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return '<th class="sortable' + (active ? ' sort-active' : '') + '" data-sort-field="' + field + '">' + label + arrow + '</th>';
+  }
+
+  function renderTaskTable(tasks) {
+    // Defaults to earliest-due-first (most overdue first) from the collector,
+    // but the user can click Assigned/Accepted/Due to re-sort by that column.
+    tasks = sortTasksBy(tasks, taskSort.field, taskSort.dir);
+    var rows = tasks.map(function (t) {
+      var overdue = isOverdue(t) && t.TaskStatus !== 'Completed';
+      var dueSoon = isDueSoon(t);
+      var stateClass = rowStateClass(t);
+      var desc = cleanDescription(t.ProjectDescription);
+      var dueBadge = overdue ? '<div class="overdue-tag">overdue</div>' : (dueSoon ? '<div class="due-soon-tag">due soon</div>' : '');
+      // A Pending task that's Individual-assigned is earmarked for one
+      // named person, not open to "whoever grabs it first" - showing plain
+      // "Pending" here is what prompted this fix, since it looked
+      // indistinguishable from a task anyone in the group could take.
+      var statusText = (t.TaskStatus === 'Pending' && t.IsDirectAssignment) ? 'Assigned' : (t.TaskStatus || '');
+      return '<tr' + (stateClass ? ' class="' + stateClass + '"' : '') + '>' +
+        '<td>' +
+          (t.ProjectID
+            ? '<a class="project-link" href="' + escapeHtml(projectDoxUrl(t.ProjectID)) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(t.ProjectName || '') + '</a>'
+            : escapeHtml(t.ProjectName || '')) +
+        '</td>' +
+        '<td class="desc-cell"><div class="clamp-2">' + escapeHtml(desc) + '</div></td>' +
+        '<td class="loc-cell"><div class="clamp-2">' + escapeHtml(cleanDescription(t.ProjectLocation)) + '</div></td>' +
+        '<td class="cycle-cell">' + renderCycleCell(t) + '</td>' +
+        '<td>' + escapeHtml(statusText) + '</td>' +
+        '<td>' + escapeHtml(t.AssignedUserName || '—') + '</td>' +
+        '<td>' + fmtDate(t.DateAssigned) + '</td>' +
+        '<td>' + fmtDate(t.DateAccepted) + '</td>' +
+        '<td class="due-cell' + (overdue ? ' overdue-cell' : '') + '">' + fmtDate(t.DateDue) + dueBadge + '</td>' +
+      '</tr>';
+    }).join('');
+    return '<table class="task-table">' +
+      '<colgroup><col class="col-project"><col class="col-desc"><col class="col-loc"><col class="col-cycle"><col class="col-status"><col class="col-assignee">' +
+        '<col class="col-date"><col class="col-date"><col class="col-due-narrow"></colgroup>' +
+      '<thead><tr>' +
+      '<th>Project</th><th>Description</th><th>Location</th><th>Rev / Cycle</th><th>Status</th><th>Assigned to</th>' +
+      sortHeader('Assigned', 'DateAssigned') + sortHeader('Accepted', 'DateAccepted') + sortHeader('Due', 'DateDue') +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function timeAgo(iso) {
+    var d = new Date(iso);
+    var mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + ' min ago';
+    var hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + ' hr' + (hrs === 1 ? '' : 's') + ' ago';
+    var days = Math.round(hrs / 24);
+    return days + ' day' + (days === 1 ? '' : 's') + ' ago';
+  }
+
+  function load() {
+    fetch(SNAPSHOT_URL, { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (json) {
+        state.data = json;
+        document.getElementById('loadingState').style.display = 'none';
+        document.getElementById('errorState').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        render();
+      })
+      .catch(function (err) {
+        document.getElementById('loadingState').style.display = 'none';
+        var el = document.getElementById('errorState');
+        el.style.display = 'block';
+        el.textContent = 'Could not load workload-snapshot.json: ' + err.message + ' (click "Refresh now" to fetch it for the first time, or make sure server.js is running)';
+      });
+  }
+
+  var refreshBtn = document.getElementById('refreshBtn');
+  var refreshBtnLabel = document.getElementById('refreshBtnLabel');
+  var refreshSpinner = document.getElementById('refreshSpinner');
+  var refreshStatusEl = document.getElementById('refreshStatus');
+  var refreshLogToggle = document.getElementById('refreshLogToggle');
+  var refreshLogPanel = document.getElementById('refreshLogPanel');
+  var pollTimer = null;
+  var logPanelOpen = false;
+  // Bumped once per doRefresh() call; a pollStatus() started under an older
+  // token is stale by the time it resolves (the fetch('refresh') it was
+  // tracking already finished) and must not be allowed to overwrite the
+  // final Done/failed message with old "Refreshing..." text - that race is
+  // exactly what produced the confusing "Refreshing (58s): Done in 6s."
+  // combined message.
+  var activeRefreshToken = 0;
+
+  function fmtElapsed(sec) {
+    if (sec == null) return '';
+    if (sec < 60) return sec + 's';
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m + 'm ' + s + 's';
+  }
+
+  function renderLogPanel(logLines) {
+    if (!logLines || !logLines.length) { refreshLogPanel.innerHTML = ''; return; }
+    refreshLogPanel.innerHTML = logLines.map(function (entry) {
+      var t = new Date(entry.t).toLocaleTimeString();
+      return '<div class="log-line"><span class="log-time">' + t + '</span>' + escapeHtml(entry.msg) + '</div>';
+    }).join('');
+    refreshLogPanel.scrollTop = refreshLogPanel.scrollHeight;
+  }
+
+  // Polls the collector's own progress (the same log() lines it prints to
+  // the console) instead of just ticking a generic elapsed-time counter, so
+  // "Refreshing..." actually says what's happening - important now that a
+  // cold run (no usable cache) can take several minutes, not seconds.
+  function pollStatus(token) {
+    fetch('refresh-status')
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s.log && s.log.length) {
+          refreshLogToggle.style.display = 'inline';
+          if (logPanelOpen) renderLogPanel(s.log);
+        }
+        if (token !== activeRefreshToken) return; // superseded - the refresh this poll was tracking already finished
+        var elapsed = fmtElapsed(s.elapsedSeconds);
+        var lastLine = s.log && s.log.length ? s.log[s.log.length - 1].msg : 'Starting...';
+        refreshStatusEl.textContent = 'Refreshing (' + elapsed + '): ' + lastLine;
+      })
+      .catch(function () { /* transient poll failure - next tick will retry, nothing to show the user for one miss */ });
+  }
+
+  refreshLogToggle.addEventListener('click', function () {
+    logPanelOpen = !logPanelOpen;
+    refreshLogToggle.textContent = logPanelOpen ? 'Hide details' : 'Show details';
+    refreshLogPanel.style.display = logPanelOpen ? 'block' : 'none';
+    if (logPanelOpen) pollStatus(activeRefreshToken);
+  });
+
+  function doRefresh() {
+    var myToken = ++activeRefreshToken;
+    refreshBtn.disabled = true;
+    refreshBtn.classList.remove('error');
+    refreshStatusEl.classList.remove('done');
+    refreshBtnLabel.textContent = 'Refreshing…';
+    refreshSpinner.style.display = 'inline-block';
+    document.getElementById('errorState').style.display = 'none';
+    refreshStatusEl.textContent = 'Refreshing... starting up';
+    pollTimer = setInterval(function () { pollStatus(myToken); }, 1200);
+    pollStatus(myToken);
+
+    fetch('refresh', { method: 'POST' })
+      .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+      .then(function (result) {
+        clearInterval(pollTimer);
+        refreshBtn.disabled = false;
+        refreshBtnLabel.textContent = 'Refresh now';
+        refreshSpinner.style.display = 'none';
+        if (!result.ok || !result.body.ok) {
+          refreshBtn.classList.add('error');
+          refreshStatusEl.textContent = 'Refresh failed: ' + (result.body.error || 'unknown error');
+          return;
+        }
+        refreshStatusEl.classList.add('done');
+        refreshStatusEl.innerHTML = '<span class="refresh-check">✓</span>Done in ' + fmtElapsed(result.body.tookSeconds);
+        load();
+      })
+      .catch(function (err) {
+        clearInterval(pollTimer);
+        refreshBtn.disabled = false;
+        refreshBtnLabel.textContent = 'Refresh now';
+        refreshSpinner.style.display = 'none';
+        refreshBtn.classList.add('error');
+        refreshStatusEl.textContent = 'Refresh request failed: ' + err.message + ' (is server.js running?)';
+      });
+  }
+
+  refreshBtn.addEventListener('click', doRefresh);
+
+  // Light/dark toggle. The actual color-switching is just the data-theme
+  // attribute (the CSS variables at the top of the file already have
+  // :root[data-theme="dark"]/"light" overrides, on top of the system-driven
+  // prefers-color-scheme default) - a tiny inline script in <head> already
+  // applies any saved choice before first paint so there's no flash of the
+  // wrong theme; this is just the button's own click handling and icon.
+  var ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><line x1="12" y1="2" x2="12" y2="4.5"/><line x1="12" y1="19.5" x2="12" y2="22"/><line x1="2" y1="12" x2="4.5" y2="12"/><line x1="19.5" y1="12" x2="22" y2="12"/><line x1="4.9" y1="4.9" x2="6.6" y2="6.6"/><line x1="17.4" y1="17.4" x2="19.1" y2="19.1"/><line x1="4.9" y1="19.1" x2="6.6" y2="17.4"/><line x1="17.4" y1="6.6" x2="19.1" y2="4.9"/></svg>';
+  var ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>';
+
+  function effectiveTheme() {
+    var attr = document.documentElement.getAttribute('data-theme');
+    if (attr === 'dark' || attr === 'light') return attr;
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  }
+  function updateThemeToggleButton(theme) {
+    var btn = document.getElementById('themeToggleBtn');
+    if (!btn) return;
+    // Icon reflects the CURRENT theme (sun while light, moon while dark);
+    // the label/tooltip describes the action clicking it takes.
+    btn.innerHTML = theme === 'dark' ? ICON_MOON : ICON_SUN;
+    var label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('ePlanDashboardTheme', theme); } catch (e) {}
+    updateThemeToggleButton(theme);
+  }
+  document.getElementById('themeToggleBtn').addEventListener('click', function () {
+    applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark');
+  });
+  updateThemeToggleButton(effectiveTheme());
+
+  function render() {
+    var data = state.data;
+    if (!data) return;
+
+    var genDate = new Date(data.GeneratedAt);
+    document.getElementById('generatedMeta').textContent =
+      'Updated ' + timeAgo(data.GeneratedAt) + ' (' + genDate.toLocaleString() + ')';
+    var staleMin = (Date.now() - genDate.getTime()) / 60000;
+    document.getElementById('staleBadge').style.display = staleMin > STALE_AFTER_MIN ? 'inline-block' : 'none';
+
+    var groups = data.Groups || [];
+    var visible = groups.filter(function (g) {
+      if (!state.showApplicant && /^(applicant|fee group)$/i.test(g.GroupName || '')) return false;
+      if (state.search && (g.GroupName || '').toLowerCase().indexOf(state.search) === -1) return false;
+      return true;
+    });
+
+    renderStats(groups, visible, (data.CompletedTodaySummary && data.CompletedTodaySummary.TotalCount) || 0);
+    renderCompletedToday(data.CompletedTodaySummary, groups);
+    if (state.view === 'chart') { renderChart(visible); } else { renderTable(visible); }
+  }
+
+  var ICON_CHEVRON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
+
+  // Who completed what today, sliced by workflow/group/reviewer depending
+  // on state.completedView - shown whenever there's at least one completion,
+  // regardless of which Tasks: toggle is active, since supervisors want this
+  // at a glance without switching modes.
+  function renderCompletedToday(summary, allGroups) {
+    var panel = document.getElementById('completedTodayPanel');
+    if (!summary || !summary.TotalCount) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+
+    // Per (workflow, group) staff breakdown, shown inline beside every group
+    // row below - summary.ByGroup already carries this (collector.js
+    // computes it once for the Group view), so the workflow view just needs
+    // a fast key -> ByUser lookup instead of recomputing it.
+    var groupUserMap = new Map();
+    (summary.ByGroup || []).forEach(function (g) {
+      groupUserMap.set(g.WorkflowTemplate + '::' + g.GroupName, g.ByUser || []);
+    });
+
+    // Each group's still-open task count (data.Groups, independent of the
+    // Task Workload search/filter box - Completed Today stays its own
+    // self-contained summary) - lets the Workflow view's bars show today's
+    // actual completion rate (done / (done + still open)) instead of a
+    // share-of-the-busiest-group comparison that said nothing about how
+    // much work that group has left.
+    var openCountMap = new Map();
+    (allGroups || []).forEach(function (g) {
+      openCountMap.set(g.WorkflowTemplate + '::' + g.GroupName, g.OpenTaskCount || 0);
+    });
+
+    var bodyHtml = state.completedView === 'group' ? renderCompletedByGroup(summary.ByGroup)
+      : state.completedView === 'reviewer' ? renderCompletedByReviewer(summary.ByReviewer)
+      : renderCompletedByWorkflow(summary.ByWorkflow, groupUserMap, openCountMap);
+
+    panel.innerHTML =
+      '<div class="completed-panel-header">' +
+        '<div class="completed-panel-title-wrap">' +
+          '<div class="completed-check-icon">' + ICON_CHECK + '</div>' +
+          '<div>' +
+            '<h2 class="completed-panel-title">Completed today</h2>' +
+            '<div class="completed-panel-sub">' + fmtInt(summary.TotalCount) + ' task' + (summary.TotalCount === 1 ? '' : 's') + ' completed today' +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.WorkflowCount) + ' workflow' + (summary.WorkflowCount === 1 ? '' : 's') +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.GroupCount) + ' group' + (summary.GroupCount === 1 ? '' : 's') +
+              ' &nbsp;&middot;&nbsp; ' + fmtInt(summary.StaffCount) + ' staff' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="completed-panel-actions">' +
+          '<span class="sort-toggle-label">View by:</span>' +
+          '<div class="view-toggle" id="completedViewToggle">' +
+            '<button data-completed-view="workflow"' + (state.completedView === 'workflow' ? ' class="active"' : '') + '>Workflow</button>' +
+            '<button data-completed-view="group"' + (state.completedView === 'group' ? ' class="active"' : '') + '>Group</button>' +
+            '<button data-completed-view="reviewer"' + (state.completedView === 'reviewer' ? ' class="active"' : '') + '>Staff</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="completed-panel-body">' + bodyHtml + '</div>' +
+      '<div class="completed-panel-footer">' +
+        '<span>Counts reflect tasks completed today. Staff may appear in multiple workflows/groups.</span>' +
+      '</div>';
+
+    document.getElementById('completedViewToggle').querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        state.completedView = btn.getAttribute('data-completed-view');
+        render();
+      });
+    });
+    wireCompletedWorkflowRows();
+    wireCompletedFlatMoreLinks();
+    wireCompletedTaskPopovers();
+  }
+
+  function wireCompletedTaskPopovers() {
+    document.querySelectorAll('.completed-person-chip.clickable').forEach(function (chip) {
+      function toggle() {
+        var key = chip.getAttribute('data-task-popover-key');
+        completedTaskPopoverKey = completedTaskPopoverKey === key ? null : key;
+        render();
+      }
+      chip.addEventListener('click', toggle);
+      chip.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    });
+  }
+
+  function wireCompletedFlatMoreLinks() {
+    document.querySelectorAll('.completed-flat-more').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var key = btn.getAttribute('data-flatmore-key');
+        if (completedGroupTabShowAllKeys.has(key)) completedGroupTabShowAllKeys.delete(key); else completedGroupTabShowAllKeys.add(key);
+        render();
+      });
+    });
+  }
+
+  // One row per group: its own bar/count plus its own reviewers inline to
+  // the right - keyPrefix+userMap (workflow template -> summary.ByGroup
+  // lookup) resolve which staff worked THAT group, so the group -> people
+  // relationship is always visible instead of living behind a click or in a
+  // separate aggregate pool that mixes everyone across the whole workflow.
+  // Sorted alphabetically (not by count) so a department's position in the
+  // list doesn't shift day to day. Every group shows - no cap/collapse.
+  // One CSS Grid per bucket (not one flex row each) - a shared grid is what
+  // makes the name/bar/count columns actually line up across every row,
+  // since the name column's width is computed once, from the widest name in
+  // the WHOLE list, instead of each row sizing its own name box
+  // independently. Each row is a "display:contents" wrapper so its 4 pieces
+  // become direct grid items (contents boxes don't participate in the grid
+  // sizing themselves - only real content does).
+  function completedGroupRows(entries, cls, emptyLabel, keyPrefix, groupUserMap, openCountMap) {
+    if (!entries.length) return '<div style="color:var(--text-muted); font-size:12.5px;">' + emptyLabel + '</div>';
+    var sorted = entries.slice().sort(function (a, b) {
+      return (a.GroupName || '').localeCompare(b.GroupName || '');
+    });
+    var rowsHtml = sorted.map(function (e) {
+      var name = e.GroupName || e.WorkflowTemplate || 'Unknown';
+      var rowKey = keyPrefix + '::' + name;
+      // Completion rate for the day (done / (done + still open)), not a
+      // share of whichever group is busiest - a bar scaled to the busiest
+      // group said nothing about how much work THIS group still has left,
+      // which is what "done vs remaining" actually means. A group with no
+      // matching entry in data.Groups (nothing currently open) reads as
+      // fully done (100%), which is correct - there's nothing left.
+      var openCount = (openCountMap && openCountMap.get(rowKey)) || 0;
+      var dayTotal = e.Count + openCount;
+      var pct = dayTotal ? (e.Count / dayTotal * 100) : 100;
+      var titleText = escapeHtml(name) + ': ' + fmtInt(e.Count) + ' completed, ' + fmtInt(openCount) + ' still open today (' + Math.round(pct) + '% done)';
+      var users = groupUserMap.get(rowKey) || [];
+      return '<div class="completed-member-row">' +
+        '<div class="completed-mini-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>' +
+        '<div class="completed-mini-bar" title="' + titleText + '"><div class="completed-mini-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+        '<div class="completed-mini-count" title="' + titleText + '">' + fmtInt(e.Count) + '</div>' +
+        '<div class="completed-member-chips">' + completedMemberChips(users, cls, rowKey) + '</div>' +
+      '</div>';
+    }).join('');
+    return '<div class="completed-group-grid">' + rowsHtml + '</div>';
+  }
+
+  // Operations chips (Review Coordinator/Submissions) are clickable - a
+  // single group total there hides several distinct routing steps done by
+  // the same person, which the popover below breaks back out. Review-group
+  // chips stay static (cls !== 'ops') since a review group is normally one
+  // homogeneous activity, not a mix of task types worth breaking out.
+  function completedMemberChips(users, cls, rowKey) {
+    if (!users.length) return '<span style="color:var(--text-muted); font-size:12px;">No individual breakdown available.</span>';
+    var clickable = cls === 'ops';
+    var openUser = null;
+    var chipsHtml = '<div class="completed-people-grid">' +
+      users.map(function (u) {
+        var userKey = u.UserID != null ? String(u.UserID) : (u.UserName || 'unknown');
+        var chipKey = rowKey + '::' + userKey;
+        var isOpen = clickable && completedTaskPopoverKey === chipKey;
+        if (isOpen) openUser = u;
+        var interactiveAttrs = clickable
+          ? ' data-task-popover-key="' + escapeHtml(chipKey) + '" tabindex="0" role="button" aria-expanded="' + (isOpen ? 'true' : 'false') + '"'
+          : '';
+        return '<div class="completed-person-chip ' + cls + (clickable ? ' clickable' : '') + (isOpen ? ' active' : '') + '"' + interactiveAttrs + '>' +
+          '<span class="completed-person-count">' + fmtInt(u.Count) + '</span>' + escapeHtml(u.UserName || 'Unknown') +
+        '</div>';
+      }).join('') +
+    '</div>';
+    // Group-wide per-task totals (everyone in this group, not just the
+    // selected person) - computed from the same `users` list the chips
+    // above already have, so the popover's bars can show "14 of the 42
+    // Prescreen tasks the whole group completed" rather than 14's share of
+    // just this one person's day.
+    var groupTaskTotals = {};
+    users.forEach(function (u) {
+      (u.ByTask || []).forEach(function (t) {
+        groupTaskTotals[t.TaskName] = (groupTaskTotals[t.TaskName] || 0) + t.Count;
+      });
+    });
+    return chipsHtml + (openUser ? completedTaskPopover(openUser, groupTaskTotals) : '');
+  }
+
+  // Task-name order follows the real workflow sequence (Prescreen -> Assign
+  // Reviewers -> Begin Review -> ... -> Batch Stamp), via
+  // compareTaskNames/TASK_ORDER_HINTS - not alphabetical, not by count.
+  function completedTaskPopover(user, groupTaskTotals) {
+    var tasks = (user.ByTask || []).slice().sort(function (a, b) { return compareTaskNames(a.TaskName, b.TaskName); });
+    // Each bar is this person's share of the GROUP's total for that specific
+    // task ("Regina did 14 of the 42 Prescreen tasks the group completed"),
+    // not a share of her own day - a task she barely touched should show a
+    // short bar even if it happens to be a big chunk of her personal total.
+    var rowsHtml = tasks.map(function (t) {
+      var groupTotal = groupTaskTotals[t.TaskName] || t.Count;
+      var pct = groupTotal ? (t.Count / groupTotal * 100) : 0;
+      // No literal quote marks around the task name here - this string gets
+      // embedded inside an HTML title="..." attribute below, and an
+      // unescaped " closes that attribute early, silently truncating
+      // everything after it (caught by inspecting the rendered title in a
+      // browser - it cut off right before the task name every time).
+      var titleText = escapeHtml(user.UserName || 'Unknown') + ' completed ' + fmtInt(t.Count) + ' of ' + fmtInt(groupTotal) + ' total ' + escapeHtml(t.TaskName) + ' tasks';
+      return '<div class="completed-task-popover-name" title="' + titleText + '">' + escapeHtml(t.TaskName) + '</div>' +
+        '<div class="completed-task-popover-count" title="' + titleText + '">' + fmtInt(t.Count) + '</div>' +
+        '<div class="completed-mini-bar" title="' + titleText + '"><div class="completed-mini-bar-fill ops" style="width:' + pct + '%"></div></div>';
+    }).join('');
+    return '<div class="completed-task-popover">' +
+      '<div class="completed-task-popover-header">' +
+        '<span class="completed-task-popover-title">' + escapeHtml(user.UserName || 'Unknown') + '</span>' +
+        '<span class="completed-task-popover-total"><b>' + fmtInt(user.Count) + '</b> completed</span>' +
+      '</div>' +
+      '<div class="completed-task-popover-grid">' +
+        (rowsHtml || '<div style="grid-column: 1 / -1; color:var(--text-muted); font-size:12.5px;">No task breakdown available.</div>') +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderCompletedByWorkflow(byWorkflow, groupUserMap, openCountMap) {
+    byWorkflow = byWorkflow || [];
+    if (!byWorkflow.length) return '<div class="empty-state">Nothing completed today yet.</div>';
+    byWorkflow = byWorkflow.slice().sort(function (a, b) { return compareWorkflowNames(a.WorkflowTemplate, b.WorkflowTemplate); });
+    return byWorkflow.map(function (w) {
+      var key = w.WorkflowTemplate;
+      var isOpen = completedOpenKeys.has(key);
+      var row = '<div class="completed-workflow-row' + (isOpen ? ' open' : '') + '" data-completed-key="' + escapeHtml(key) + '" tabindex="0" role="button" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
+        '<div class="completed-chevron">' + ICON_CHEVRON + '</div>' +
+        '<div class="completed-workflow-name-wrap">' +
+          '<span class="completed-workflow-name">' + escapeHtml(key) + '</span>' +
+          '<span class="completed-workflow-count">' + fmtInt(w.Count) + ' completed</span>' +
+        '</div>' +
+        '<div class="completed-workflow-legend">' +
+          '<span class="legend-item"><span class="swatch accepted"></span><b>' + fmtInt(w.ReviewGroups.Count) + '</b>&nbsp;Reviews</span>' +
+          '<span class="legend-item"><span class="swatch pending"></span><b>' + fmtInt(w.Operations.Count) + '</b>&nbsp;Processing</span>' +
+        '</div>' +
+      '</div>';
+
+      var detail = '';
+      if (isOpen) {
+        detail = '<div class="completed-detail">' +
+          '<div class="completed-bucket">' +
+            '<h3 class="completed-detail-col-title">Reviews &ndash; Completed</h3>' +
+            completedGroupRows(w.ReviewGroups.ByGroup, 'review', 'No review tasks completed today.', key, groupUserMap, openCountMap) +
+          '</div>' +
+          '<div class="completed-bucket">' +
+            '<h3 class="completed-detail-col-title">Processing (non-review)</h3>' +
+            completedGroupRows(w.Operations.ByGroup, 'ops', 'No processing tasks completed today.', key, groupUserMap, openCountMap) +
+          '</div>' +
+        '</div>';
+      }
+      return '<div class="completed-workflow-block">' + row + detail + '</div>';
+    }).join('');
+  }
+
+  function renderCompletedByGroup(byGroup) {
+    byGroup = byGroup || [];
+    if (!byGroup.length) return '<div class="empty-state">Nothing completed today yet.</div>';
+    var max = Math.max.apply(null, byGroup.map(function (g) { return g.Count; }).concat([1]));
+    return byGroup.map(function (g) {
+      var pct = max ? (g.Count / max * 100) : 0;
+      var barCls = g.IsOperations ? 'pending' : 'accepted';
+      var chipCls = g.IsOperations ? 'ops' : 'review';
+      var rowKey = g.WorkflowTemplate + '::' + g.GroupName;
+      var showAll = completedGroupTabShowAllKeys.has(rowKey);
+      var topUsers = showAll ? g.ByUser : g.ByUser.slice(0, 4);
+      return '<div class="completed-flat-row">' +
+        '<div class="completed-flat-main">' +
+          '<div class="completed-flat-title">' + escapeHtml(g.GroupName) + (g.IsOperations ? '<span class="completed-flat-badge">Processing</span>' : '') + '</div>' +
+          '<div class="completed-flat-sub">' + escapeHtml(g.WorkflowTemplate) + '</div>' +
+        '</div>' +
+        '<div class="bar-track completed-flat-bar" style="cursor:default;"><div class="bar-seg ' + barCls + '" style="left:0%; width:' + pct + '%"></div></div>' +
+        '<div class="completed-flat-count">' + fmtInt(g.Count) + '</div>' +
+        '<div class="completed-flat-people">' +
+          topUsers.map(function (u) {
+            return '<div class="completed-person-chip ' + chipCls + '"><span class="completed-person-count">' + fmtInt(u.Count) + '</span>' + escapeHtml(u.UserName || 'Unknown') + '</div>';
+          }).join('') +
+          (g.ByUser.length > topUsers.length
+            ? '<button class="completed-flat-more" data-flatmore-key="' + escapeHtml(rowKey) + '">+' + (g.ByUser.length - topUsers.length) + ' more</button>'
+            : (showAll && g.ByUser.length > 4 ? '<button class="completed-flat-more" data-flatmore-key="' + escapeHtml(rowKey) + '">Show less</button>' : '')) +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // Staff tab: Processing (Review Coordinator/Submissions) and Reviews are
+  // two different kinds of work, so they're kept as two separate,
+  // independently-ranked lists instead of one list sorted by a combined
+  // total - a coordinator who closed 300 routing tasks isn't "busier" than
+  // a reviewer who closed 15 technical reviews, so ranking them against
+  // each other in one list was misleading.
+  function renderCompletedByReviewer(byReviewer) {
+    byReviewer = byReviewer || [];
+    if (!byReviewer.length) return '<div class="empty-state">Nothing completed today yet.</div>';
+    var processing = byReviewer.filter(function (r) { return (r.OperationsCount || 0) > 0; })
+      .sort(function (a, b) { return b.OperationsCount - a.OperationsCount || (a.UserName || '').localeCompare(b.UserName || ''); });
+    var reviewers = byReviewer.filter(function (r) { return (r.ReviewGroupsCount || 0) > 0; })
+      .sort(function (a, b) { return b.ReviewGroupsCount - a.ReviewGroupsCount || (a.UserName || '').localeCompare(b.UserName || ''); });
+    return '<div class="completed-staff-section">' +
+        '<h3 class="completed-detail-col-title">Reviews</h3>' +
+        completedStaffRows(reviewers, 'ReviewGroupsCount', 'accepted') +
+      '</div>' +
+      '<div class="completed-staff-section">' +
+        '<h3 class="completed-detail-col-title">Processing</h3>' +
+        completedStaffRows(processing, 'OperationsCount', 'pending') +
+      '</div>';
+  }
+
+  function completedStaffRows(list, countField, barCls) {
+    if (!list.length) return '<div style="color:var(--text-muted); font-size:12.5px;">No completions.</div>';
+    var max = Math.max.apply(null, list.map(function (r) { return r[countField]; }).concat([1]));
+    return list.map(function (r) {
+      var count = r[countField];
+      var pct = max ? (count / max * 100) : 0;
+      var topWorkflows = r.ByWorkflow.slice(0, 3);
+      return '<div class="completed-flat-row">' +
+        '<div class="completed-flat-main">' +
+          '<div class="completed-flat-title">' + escapeHtml(r.UserName || 'Unknown') + '</div>' +
+          '<div class="completed-flat-sub">' + topWorkflows.map(function (w) { return escapeHtml(w.WorkflowTemplate) + ' (' + fmtInt(w.Count) + ')'; }).join(' &middot; ') + '</div>' +
+        '</div>' +
+        '<div class="bar-track completed-flat-bar" style="cursor:default;"><div class="bar-seg ' + barCls + '" style="left:0%; width:' + pct + '%"></div></div>' +
+        '<div class="completed-flat-count">' + fmtInt(count) + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  function wireCompletedWorkflowRows() {
+    document.querySelectorAll('.completed-workflow-row').forEach(function (row) {
+      function toggle() {
+        var key = row.getAttribute('data-completed-key');
+        if (completedOpenKeys.has(key)) completedOpenKeys.delete(key); else completedOpenKeys.add(key);
+        render();
+      }
+      row.addEventListener('click', toggle);
+      row.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    });
+  }
+
+  // Simple, hand-drawn geometric icons (not traced from any icon library) -
+  // one per stat tile, tinted via currentColor so the same markup works for
+  // any of the .stat-icon color classes.
+  var ICON_LIST = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>';
+  var ICON_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 16 14"/></svg>';
+  var ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12.5 11 15.5 16 9"/></svg>';
+  // A single person with a claim-mark, not the plain checkmark used for
+  // "done" - "Accepted" means someone picked the task up and is actively on
+  // it, a different state from finished, so it shouldn't share Completed's icon.
+  var ICON_ACCEPTED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="3.2"/><path d="M4 20c0-3.5 2.7-6 6-6s6 2.5 6 6"/><path d="M15.3 14.7 L17.1 16.5 L20.3 13"/></svg>';
+  var ICON_ALERT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L21 19 L3 19 Z"/><line x1="12" y1="9" x2="12" y2="14"/><circle cx="12" cy="16.7" r="0.6" fill="currentColor" stroke="none"/></svg>';
+  // A branch-then-merge flow (one step splitting into two parallel review
+  // paths, then converging) - reads as "workflow" without being a generic
+  // document/list icon already used elsewhere on the page.
+  var ICON_WORKFLOW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="12" r="2.2"/><circle cx="12" cy="5.5" r="2.2"/><circle cx="12" cy="18.5" r="2.2"/><circle cx="20" cy="12" r="2.2"/><path d="M6 11 L9.5 7"/><path d="M6 13 L9.5 17"/><path d="M14.5 7 L18 11"/><path d="M14.5 17 L18 13"/></svg>';
+
+  function renderStats(allGroups, visibleGroups, completedTodayTotal) {
+    var totalOpen = 0, totalPending = 0, totalAccepted = 0, totalOverdue = 0;
+    visibleGroups.forEach(function (g) {
+      totalOpen += g.OpenTaskCount || 0;
+      totalPending += g.PendingCount || 0;
+      totalAccepted += g.AcceptedCount || 0;
+      totalOverdue += countOverdue(g.Tasks);
+    });
+    var el = document.getElementById('statRow');
+    el.innerHTML =
+      statTile('Open tasks', fmtInt(totalOpen), 'neutral', ICON_LIST) +
+      statTile('Pending (unclaimed)', fmtInt(totalPending), 'pending', ICON_CLOCK) +
+      statTile('Accepted (in progress)', fmtInt(totalAccepted), 'accepted', ICON_ACCEPTED) +
+      statTile('Overdue', fmtInt(totalOverdue), 'overdue', ICON_ALERT) +
+      statTile('Completed today', fmtInt(completedTodayTotal), 'accepted', ICON_CHECK);
+  }
+
+  function statTile(label, value, cls, icon) {
+    return '<div class="stat-tile"><div class="stat-icon ' + cls + '">' + icon + '</div>' +
+      '<div class="stat-text"><div class="stat-label">' + label + '</div>' +
+      '<div class="stat-value ' + cls + '">' + value + '</div></div></div>';
+  }
+
+  function groupByTemplate(groups) {
+    var byTemplate = {};
+    var order = [];
+    groups.forEach(function (g) {
+      var t = g.WorkflowTemplate || 'Unknown template';
+      if (!byTemplate[t]) { byTemplate[t] = []; order.push(t); }
+      byTemplate[t].push(g);
+    });
+    order.sort(compareWorkflowNames);
+    return { byTemplate: byTemplate, order: order };
+  }
+
+  function renderChart(groups) {
+    var container = document.getElementById('chartView');
+    document.getElementById('tableView').style.display = 'none';
+    container.style.display = 'block';
+
+    if (groups.length === 0) {
+      container.innerHTML = '<div class="empty-state">No review groups match the current filter.</div>';
+      return;
+    }
+
+    var g = groupByTemplate(groups);
+    var maxCount = Math.max.apply(null, groups.map(function (x) { return x.OpenTaskCount || 0; }).concat([1]));
+    var reviewerNeedle = state.reviewerSearch.toLowerCase();
+    var reviewerFilterActive = !!reviewerNeedle;
+
+    var html = '';
+    g.order.forEach(function (templateName) {
+      var rows = g.byTemplate[templateName].slice().sort(function (a, b) {
+        if (state.groupSort === 'name') return (a.GroupName || '').localeCompare(b.GroupName || '');
+        return (b.OpenTaskCount || 0) - (a.OpenTaskCount || 0);
+      });
+      // "Completed only"/"Overdue only" are review modes, not workload views
+      // - a department with nothing matching is just noise in either mode.
+      if (state.taskView === 'completedOnly') {
+        rows = rows.filter(function (r) { return (r.CompletedTodayCount || 0) > 0; });
+      }
+      if (state.taskView === 'overdueOnly') {
+        rows = rows.filter(function (r) { return (r.Tasks || []).some(isOverdueTask); });
+      }
+      // Filtering by reviewer name is meant to answer "show me everything
+      // this person has" across every department at once - a group with
+      // nothing of theirs is noise here the same way an empty department is
+      // in Completed only mode.
+      if (reviewerFilterActive) {
+        rows = rows.filter(function (r) { return (r.Tasks || []).some(function (t) { return taskMatchesReviewer(t, reviewerNeedle); }); });
+      }
+      if (!rows.length) return;
+      var templateTotal = rows.reduce(function (s, r) { return s + (r.OpenTaskCount || 0); }, 0);
+
+      html += '<div class="template-section"><h2 class="template-title">' +
+        '<span class="template-icon">' + ICON_WORKFLOW + '</span>' +
+        escapeHtml(templateName) +
+        '<span class="template-sub">' + fmtInt(templateTotal) + ' open task' + (templateTotal === 1 ? '' : 's') + '</span></h2>' +
+        '<div class="template-groups">' +
+        '<div class="group-col-header group-grid-cols">' +
+          '<div>Department</div><div class="num">Open</div><div>Status breakdown</div><div>Progress</div><div>Oldest waiting</div>' +
+        '</div>';
+
+      rows.forEach(function (row) {
+        var key = templateName + '::' + row.GroupName;
+        var pending = row.PendingCount || 0;
+        var accepted = row.AcceptedCount || 0;
+        var total = row.OpenTaskCount || 0;
+        var completedToday = row.CompletedTodayCount || 0;
+        var tasks = row.Tasks || [];
+        // row.Tasks can include tasks Completed today alongside the open
+        // ones - which of those the detail table shows depends on the
+        // Tasks: Open / + Completed / Completed only / Overdue only toggle.
+        // Overdue only pulls from every task regardless of status (isOverdueTask
+        // itself already excludes Completed, so this can't surface a "completed
+        // and overdue" contradiction).
+        var detailTasks = state.taskView === 'completedOnly'
+          ? tasks.filter(function (t) { return t.TaskStatus === 'Completed'; })
+          : state.taskView === 'overdueOnly'
+          ? tasks.filter(isOverdueTask)
+          : state.taskView === 'withCompleted'
+          ? tasks
+          : tasks.filter(function (t) { return t.TaskStatus !== 'Completed'; });
+        if (reviewerFilterActive) {
+          detailTasks = detailTasks.filter(function (t) { return taskMatchesReviewer(t, reviewerNeedle); });
+        }
+        // Overdue is a status that can land on either a Pending or an Accepted
+        // task; Pending/Accepted counts (and their sum to total) stay exactly
+        // as ProjectDox reports them for the text summary. For the BAR only,
+        // overdue tasks are pulled out into their own third segment - Pending
+        // -> Accepted -> Overdue, three mutually exclusive buckets - since a
+        // striped overlay on the other two turned out harder to read at a
+        // glance than a plain solid segment.
+        var pendingOverdue = countOverdue(tasks.filter(function (t) { return t.TaskStatus === 'Pending'; }));
+        var acceptedOverdue = countOverdue(tasks.filter(function (t) { return t.TaskStatus === 'Accepted'; }));
+        var overdueCount = pendingOverdue + acceptedOverdue;
+        var pendingOk = pending - pendingOverdue;
+        var acceptedOk = accepted - acceptedOverdue;
+
+        var pctOf = function (n) { return maxCount ? (n / maxCount * 100) : 0; };
+        var pendingPct = pctOf(pendingOk);
+        var acceptedPct = pctOf(acceptedOk);
+        var overduePct = pctOf(overdueCount);
+
+        var oldestDays = oldestWaitingDays(tasks);
+
+        var breakdownHtml = state.taskView === 'completedOnly'
+          ? '<span class="n-completed">' + fmtInt(completedToday) + ' completed today</span>'
+          : '<span class="n-pending">' + fmtInt(pending) + ' pending</span>' +
+            ' &middot; <span class="n-accepted">' + fmtInt(accepted) + ' accepted</span>' +
+            (overdueCount ? ' &middot; <span class="n-overdue">' + fmtInt(overdueCount) + ' overdue</span>' : '') +
+            (state.taskView === 'withCompleted' && completedToday ? ' &middot; <span class="n-completed">' + fmtInt(completedToday) + ' completed today</span>' : '');
+
+        var isOpen = openPanelKeys.has(key);
+        html += '<div class="group-block group-grid-cols' + (isOpen ? ' open' : '') + '" data-key="' + escapeHtml(key) + '" tabindex="0" role="button" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
+          '<div class="group-name"><span class="completed-chevron group-chevron">' + ICON_CHEVRON + '</span>' + escapeHtml(row.GroupName) + '</div>' +
+          '<div class="group-open-cell">' + fmtInt(total) + '</div>' +
+          '<div class="group-breakdown-cell">' + breakdownHtml + '</div>' +
+          '<div class="bar-track" data-key="' + escapeHtml(key) + '" ' +
+            'data-pending="' + pending + '" data-accepted="' + accepted + '" data-total="' + total + '" data-overdue="' + overdueCount + '" data-group="' + escapeHtml(row.GroupName) + '">' +
+            '<div class="bar-seg pending" style="left:0%; width:' + pendingPct + '%"></div>' +
+            '<div class="bar-seg accepted" style="left:' + pendingPct + '%; width:' + acceptedPct + '%"></div>' +
+            '<div class="bar-seg overdue" style="left:' + (pendingPct + acceptedPct) + '%; width:' + overduePct + '%"></div>' +
+          '</div>' +
+          '<div class="group-oldest-cell">' + oldestWaitingPill(oldestDays) + '</div>' +
+        '</div>';
+
+        html += '<div class="detail-panel' + (isOpen ? ' open' : '') + '" id="panel-' + cssEscape(key) + '">' +
+          (detailTasks.length ? renderTaskTable(detailTasks) : '<div style="color:var(--text-muted)">No task detail available for this group.</div>') +
+          '</div>';
+      });
+
+      html += '</div></div>';
+    });
+
+    container.innerHTML = html || '<div class="empty-state">Nothing completed today yet in any visible group.</div>';
+
+    // The whole group block (name, stats, bar - not just the 22px-tall bar
+    // itself) is the click target for expanding/collapsing the task detail.
+    container.querySelectorAll('.group-block').forEach(function (block) {
+      function toggle() {
+        var key = block.getAttribute('data-key');
+        if (openPanelKeys.has(key)) openPanelKeys.delete(key); else openPanelKeys.add(key);
+        renderChart(groups);
+      }
+      block.addEventListener('click', toggle);
+      block.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    });
+
+    container.querySelectorAll('.bar-track').forEach(function (track) {
+      track.addEventListener('mousemove', function (e) { showTooltip(e, track); });
+      track.addEventListener('mouseleave', hideTooltip);
+    });
+
+    // One delegated listener covers every task table's Assigned/Accepted/Due
+    // header, in every group, since they're all re-rendered together anyway.
+    container.querySelectorAll('th.sortable').forEach(function (th) {
+      th.addEventListener('click', function (e) {
+        e.stopPropagation(); // don't also toggle the group block open/closed
+        var field = th.getAttribute('data-sort-field');
+        if (taskSort.field === field) {
+          taskSort.dir = taskSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          taskSort.field = field;
+          taskSort.dir = 'asc';
+        }
+        renderChart(groups);
+      });
+    });
+  }
+
+  function showTooltip(e, track) {
+    var group = track.getAttribute('data-group');
+    var pending = track.getAttribute('data-pending');
+    var accepted = track.getAttribute('data-accepted');
+    var total = track.getAttribute('data-total');
+    var overdue = track.getAttribute('data-overdue');
+    tooltip.innerHTML = '<strong>' + escapeHtml(group) + '</strong><br>' +
+      total + ' open &middot; ' + pending + ' pending &middot; ' + accepted + ' accepted' +
+      (overdue && overdue !== '0' ? ' &middot; <span style="color:#e66767">' + overdue + ' overdue</span>' : '') + '<br>' +
+      '<span style="opacity:.7">Click bar for task details</span>';
+    tooltip.style.display = 'block';
+    var x = e.clientX + 14, y = e.clientY + 14;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    tooltip.style.left = Math.min(x, vw - 300) + 'px';
+    tooltip.style.top = Math.min(y, vh - 100) + 'px';
+  }
+  function hideTooltip() { tooltip.style.display = 'none'; }
+
+  function renderTable(groups) {
+    document.getElementById('chartView').style.display = 'none';
+    var container = document.getElementById('tableView');
+    container.style.display = 'block';
+
+    if (groups.length === 0) {
+      container.innerHTML = '<div class="empty-state">No review groups match the current filter.</div>';
+      return;
+    }
+
+    var rows = groups.slice().sort(function (a, b) {
+      if (a.WorkflowTemplate !== b.WorkflowTemplate) return (a.WorkflowTemplate || '').localeCompare(b.WorkflowTemplate || '');
+      if (state.groupSort === 'name') return (a.GroupName || '').localeCompare(b.GroupName || '');
+      return (b.OpenTaskCount || 0) - (a.OpenTaskCount || 0);
+    });
+
+    var html = '<table class="data-table"><thead><tr>' +
+      '<th>Template</th><th>Review group</th><th class="num">Open</th><th class="num">Pending</th><th class="num">Accepted</th>' +
+      '</tr></thead><tbody>';
+    rows.forEach(function (r) {
+      html += '<tr><td>' + escapeHtml(r.WorkflowTemplate || '') + '</td>' +
+        '<td>' + escapeHtml(r.GroupName || '') + '</td>' +
+        '<td class="num">' + fmtInt(r.OpenTaskCount) + '</td>' +
+        '<td class="num">' + fmtInt(r.PendingCount) + '</td>' +
+        '<td class="num">' + fmtInt(r.AcceptedCount) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+
+  document.getElementById('searchBox').addEventListener('input', function (e) {
+    state.search = e.target.value.trim().toLowerCase();
+    render();
+  });
+  document.getElementById('reviewerSearchBox').addEventListener('input', function (e) {
+    state.reviewerSearch = e.target.value.trim();
+    // Undo exactly what the PREVIOUS search term auto-opened before doing
+    // anything else - otherwise switching names (or clearing the box) just
+    // keeps adding to openPanelKeys forever instead of putting things back
+    // the way they were. A group the user opened by hand (not through this
+    // search) was never added to reviewerAutoOpenKeys, so it's untouched.
+    reviewerAutoOpenKeys.forEach(function (key) { openPanelKeys.delete(key); });
+    reviewerAutoOpenKeys.clear();
+    // Auto-open every group with a match so "show me this person" actually
+    // shows their tasks right away instead of still requiring a click per
+    // department.
+    if (state.reviewerSearch && state.data) {
+      var needle = state.reviewerSearch.toLowerCase();
+      (state.data.Groups || []).forEach(function (g) {
+        var hasMatch = (g.Tasks || []).some(function (t) { return taskMatchesReviewer(t, needle); });
+        if (hasMatch) {
+          var key = groupKey(g.WorkflowTemplate, g.GroupName);
+          openPanelKeys.add(key);
+          reviewerAutoOpenKeys.add(key);
+        }
+      });
+    }
+    render();
+  });
+  document.getElementById('showApplicant').addEventListener('change', function (e) {
+    state.showApplicant = e.target.checked;
+    render();
+  });
+  var TASK_VIEW_BTN_IDS = {
+    open: 'taskViewOpenBtn', withCompleted: 'taskViewWithCompletedBtn',
+    completedOnly: 'taskViewCompletedOnlyBtn', overdueOnly: 'taskViewOverdueOnlyBtn'
+  };
+  function setTaskView(view) {
+    state.taskView = view;
+    Object.keys(TASK_VIEW_BTN_IDS).forEach(function (v) {
+      document.getElementById(TASK_VIEW_BTN_IDS[v]).classList.remove('active');
+    });
+    document.getElementById(TASK_VIEW_BTN_IDS[view]).classList.add('active');
+    render();
+  }
+  document.getElementById('taskViewOpenBtn').addEventListener('click', function () { setTaskView('open'); });
+  document.getElementById('taskViewWithCompletedBtn').addEventListener('click', function () { setTaskView('withCompleted'); });
+  document.getElementById('taskViewCompletedOnlyBtn').addEventListener('click', function () { setTaskView('completedOnly'); });
+  document.getElementById('taskViewOverdueOnlyBtn').addEventListener('click', function () { setTaskView('overdueOnly'); });
+  document.getElementById('sortByTasksBtn').addEventListener('click', function () {
+    state.groupSort = 'tasks';
+    this.classList.add('active');
+    document.getElementById('sortByNameBtn').classList.remove('active');
+    render();
+  });
+  document.getElementById('sortByNameBtn').addEventListener('click', function () {
+    state.groupSort = 'name';
+    this.classList.add('active');
+    document.getElementById('sortByTasksBtn').classList.remove('active');
+    render();
+  });
+  document.getElementById('chartViewBtn').addEventListener('click', function () {
+    state.view = 'chart';
+    this.classList.add('active');
+    document.getElementById('tableViewBtn').classList.remove('active');
+    render();
+  });
+  document.getElementById('tableViewBtn').addEventListener('click', function () {
+    state.view = 'table';
+    this.classList.add('active');
+    document.getElementById('chartViewBtn').classList.remove('active');
+    render();
+  });
+
+  load();
+  setInterval(load, AUTO_REFRESH_MS);
+})();
+</script>
+
+</body>
+</html>
