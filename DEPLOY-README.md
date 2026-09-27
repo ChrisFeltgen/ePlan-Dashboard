@@ -130,7 +130,7 @@ folder is created automatically, and each refresh:
 - adds the day's completions to today's file (a day's file only ever grows),
 - re-checks the last 14 days (a just-closed workflow's tasks can take a while
   to show up in ProjectDox's historical tables), and
-- backfills a few older missing days toward the last 90, so history fills in
+- backfills up to 15 older missing days toward the last 90, so history fills in
   over the first several refreshes after this is deployed instead of making
   one refresh very long.
 
@@ -142,9 +142,21 @@ Optional environment variables (defaults shown):
 | Name | Default | Meaning |
 |---|---|---|
 | `HISTORY_DAYS` | `90` | How far back the collector keeps backfilling |
-| `HISTORY_MAX_NEW_DAYS_PER_RUN` | `3` | How many older missing days to backfill per refresh |
+| `HISTORY_MAX_NEW_DAYS_PER_RUN` | `15` | How many older missing days to backfill per refresh |
+| `HISTORY_FORCE_RESCHEMA` | unset | One-time backfill: see below |
 
 Requires the updated `server.js` too (it serves the `/history` endpoint).
+
+**`HISTORY_FORCE_RESCHEMA`:** whenever a new piece of information is added to
+what a saved day records (e.g. the project description was added after this
+was first deployed), only new and recently-settled days pick it up
+automatically - an already-settled day keeps its old, shorter rows forever
+otherwise. Setting this environment variable (to anything, e.g. `1`) makes
+the collector also backfill that missing information into already-recorded
+older days, a few per refresh (same budget as `HISTORY_MAX_NEW_DAYS_PER_RUN`).
+It's safe to leave set indefinitely - once every recorded day has caught up,
+it's a cheap no-op each refresh - but there's no need to keep it once the
+history folder has stopped changing after a refresh or two.
 
 ## Troubleshooting
 

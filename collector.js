@@ -536,6 +536,15 @@ const HISTORY_MAX_NEW_DAYS_PER_RUN = Math.max(0, parseInt(process.env.HISTORY_MA
 // mirror - see the block comment above. Older days are treated as settled.
 const HISTORY_RESETTLE_DAYS = 14;
 const HISTORY_RESETTLE_MIN_AGE_HOURS = 12;
+// One-time opt-in: when a field is added to the compact row schema (e.g.
+// `desc`), only NEW/resettled days pick it up automatically - an
+// already-settled day past the resettle window keeps its old-shape rows
+// forever otherwise. Setting this backfills old days toward that new shape
+// too, a few per run (same budget as new-day backfill). It's self-limiting
+// (see dayNeedsSchemaBackfill) - once every recorded day has the field, it's
+// a cheap no-op, so it's safe to just leave set rather than remembering to
+// unset it.
+const HISTORY_FORCE_RESCHEMA = !!process.env.HISTORY_FORCE_RESCHEMA;
 const HISTORY_MAX_RANGE_DAYS = 400;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -584,9 +593,12 @@ function writeHistoryDay(date, obj) {
 }
 
 // A stored history row is deliberately compact (short keys, no per-task
-// description) - ~570 completions/day x a year adds up.
+// notes) - ~570 completions/day x a year adds up. desc is the PROJECT's own
+// description (one short string per project, not per task), included because
+// the dashboard's individual-reviews list shows it next to the project
+// number.
 //   id=WFlowTaskID wf=workflow template grp=group uid/user=who completed it
-//   task=raw task name pid/proj/loc=project id/number/location at=DateCompleted
+//   task=raw task name pid/proj/loc/desc=project id/number/location/description at=DateCompleted
 // Project number/location are trimmed: this database right-pads CHAR-typed
 // columns with spaces (a location comes back as "421 SE 6 AV" followed by
 // ~35 trailing spaces).
@@ -594,8 +606,20 @@ function toHistoryRow(r) {
   const trimmed = (s) => (s == null ? null : (String(s).trim() || null));
   return {
     id: r.id, wf: r.wf || null, grp: trimmed(r.grp), uid: r.uid != null ? r.uid : null, user: r.user || null,
-    task: r.task || null, pid: r.pid != null ? r.pid : null, proj: trimmed(r.proj), loc: trimmed(r.loc), at: r.at || null
+    task: r.task || null, pid: r.pid != null ? r.pid : null, proj: trimmed(r.proj), loc: trimmed(r.loc),
+    desc: trimmed(r.desc), at: r.at || null
   };
+}
+// True if some row in this already-recorded day predates a field being added
+// to the compact row schema (the row object is missing the KEY entirely, not
+// just holding null/undefined for it - toHistoryRow always sets every
+// current key, even to null, so a missing key only happens on rows written
+// before that key existed). Used by HISTORY_FORCE_RESCHEMA to find days that
+// still need a schema backfill, and to stop once none do.
+function dayNeedsSchemaBackfill(date) {
+  const day = readHistoryDay(date);
+  if (!day || !Array.isArray(day.rows) || !day.rows.length) return false;
+  return day.rows.some((r) => !Object.prototype.hasOwnProperty.call(r, 'desc'));
 }
 function historyRowToSummaryRow(h) {
   return { WorkflowTemplate: h.wf, GroupName: h.grp, UserID: h.uid, UserName: h.user, TaskName: h.task };
@@ -1312,6 +1336,17 @@ async function runCollector(opts = {}) {
         try { ageHours = (nowMs - fs.statSync(historyFile(d)).mtimeMs) / 3600000; } catch (e) {}
         if (ageHours >= HISTORY_RESETTLE_MIN_AGE_HOURS) derive.add(d);
       }
+      if (HISTORY_FORCE_RESCHEMA) {
+        // Always logged (even when 0 need it, or 0 fit this run's budget) -
+        // silence here would be indistinguishable from the env var not
+        // actually reaching this process (e.g. a restart that didn't take).
+        const needSchema = [...haveDates].filter((d) => !derive.has(d) && dayNeedsSchemaBackfill(d)).sort();
+        const toDo = needSchema.slice(0, HISTORY_MAX_NEW_DAYS_PER_RUN);
+        toDo.forEach((d) => derive.add(d));
+        log(`History: HISTORY_FORCE_RESCHEMA is set - ${needSchema.length} already-recorded day(s) still need backfilling; re-deriving ${toDo.length} this run.`);
+      }
+    } else if (HISTORY_FORCE_RESCHEMA) {
+      log('History: HISTORY_FORCE_RESCHEMA is set, but the Report tables aren\'t loaded this run, so nothing can be re-derived (see the "Report tables" log line above for why).');
     }
 
     // Candidate completed tasks (live table + Report mirror, deduped by task
@@ -1375,7 +1410,7 @@ async function runCollector(opts = {}) {
       if (r.TaskStatus !== 'Completed') continue;
       const grp = (r.GroupName || '').trim();
       if (SELF_SERVICE_GROUP_RE.test(grp)) continue;
-      pushRow({ id: r.WFlowTaskID, wf: r.WorkflowTemplate, grp, uid: r.UserID, user: r.AssignedUserName, task: r.TaskName, pid: r.ProjectID, proj: r.ProjectName, loc: r.ProjectLocation, at: r.DateCompleted });
+      pushRow({ id: r.WFlowTaskID, wf: r.WorkflowTemplate, grp, uid: r.UserID, user: r.AssignedUserName, task: r.TaskName, pid: r.ProjectID, proj: r.ProjectName, loc: r.ProjectLocation, desc: r.ProjectDescription, at: r.DateCompleted });
     }
     // Past days derived above.
     for (const t of candidates) {
@@ -1387,7 +1422,8 @@ async function runCollector(opts = {}) {
       const cachedProj = projectCache[String(inst.EntityID)];
       pushRow({
         id: t.WFlowTaskID, wf: wflowNameByID.get(String(inst.WFlowID)) || `WFlow${inst.WFlowID}`, grp, uid: t.UserID, user: null,
-        task: t.TaskName, pid: inst.EntityID, proj: cachedProj ? cachedProj.Name : null, loc: cachedProj ? cachedProj.Location : null, at: t.DateCompleted
+        task: t.TaskName, pid: inst.EntityID, proj: cachedProj ? cachedProj.Name : null, loc: cachedProj ? cachedProj.Location : null,
+        desc: cachedProj ? cachedProj.Description : null, at: t.DateCompleted
       });
     }
 
@@ -1415,7 +1451,7 @@ async function runCollector(opts = {}) {
     await mapConcurrent(pidsToFetch, CONCURRENCY, async (pid) => {
       try {
         const p = await getProject(sessionId, pid);
-        lookups.projects[pid] = { Name: p.Name || null, Location: p.Location || null };
+        lookups.projects[pid] = { Name: p.Name || null, Location: p.Location || null, Description: p.Description || null };
       } catch (e) {
         lookups.failed.projects[pid] = new Date().toISOString();
         log(`WARN history: GetProject(${pid}) failed: ${e.message}`);
@@ -1424,7 +1460,7 @@ async function runCollector(opts = {}) {
     for (const r of allRows) {
       if (r.proj || r.pid == null) continue;
       const p = lookups.projects[String(r.pid)] || projectFallbackByID.get(String(r.pid));
-      if (p) { r.proj = p.Name || null; r.loc = r.loc || p.Location || null; }
+      if (p) { r.proj = p.Name || null; r.loc = r.loc || p.Location || null; r.desc = r.desc || p.Description || null; }
     }
     writeJson(HISTORY_LOOKUPS_JSON, lookups);
 

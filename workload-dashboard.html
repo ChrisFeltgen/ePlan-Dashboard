@@ -196,10 +196,9 @@
   .stat-value.accepted { color: var(--series-accepted); }
   .stat-value.overdue { color: #d03b3b; }
   @media (prefers-color-scheme: dark) { .stat-value.overdue { color: #e66767; } }
-  /* Tile surfaces: "Open tasks" is the headline (blue-tinted with a blue
-     outline); In progress / Overdue carry a faint wash of their own hue;
-     Pending and Completed today stay plain. */
-  .stat-tile.neutral { background: color-mix(in srgb, var(--series-pending) 8%, var(--surface-1)); border-color: color-mix(in srgb, var(--series-pending) 45%, var(--border)); }
+  /* Tile surfaces: In progress / Overdue carry a faint wash of their own
+     hue; Open tasks, Pending and Completed today stay plain (a tinted,
+     outlined tile reads as a selected button). */
   .stat-tile.accepted { background: color-mix(in srgb, var(--series-accepted) 7%, var(--surface-1)); }
   .stat-tile.overdue { background: color-mix(in srgb, var(--status-critical) 7%, var(--surface-1)); }
 
@@ -548,6 +547,12 @@
   .completed-rows-table { font-size: 12.5px; }
   .completed-rows-table th { position: sticky; top: 0; z-index: 1; background: var(--surface-1); border-bottom: 1px solid var(--baseline); }
   .completed-rows-table td.nowrap { white-space: nowrap; }
+  /* Fixed width so a long project name (e.g. "Private Provider Registration
+     - Design 2004 Productions LLC" for a non-permit project) wraps onto a
+     second line instead of stretching the column - same clamp-2 pattern as
+     the Description column beside it. */
+  .completed-rows-table td.proj-cell { width: 140px; white-space: normal; }
+  .completed-rows-table td.proj-cell b { font-weight: 700; }
   .completed-rows-note { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
 
   .completed-panel-footer {
@@ -704,7 +709,7 @@
      display:-webkit-box directly, which shifts every following cell in the
      row out of alignment. The inner div can safely use it since it isn't
      part of the table's own box structure. */
-  table.task-table td.desc-cell, table.task-table td.loc-cell {
+  table.task-table td.desc-cell, table.task-table td.loc-cell, table.completed-rows-table td.desc-cell {
     white-space: normal; color: var(--text-secondary);
   }
   .clamp-2 {
@@ -1414,10 +1419,10 @@
       '</button>' +
       '<div id="completedRowsWrap"' + (open ? '' : ' hidden') + '>' +
       '<div class="completed-rows-head">' +
-        '<input type="search" id="completedRowsFilter" placeholder="Filter by project, task, group, or name..." value="' + escapeHtml(state.rowsFilter || '') + '">' +
+        '<input type="search" id="completedRowsFilter" placeholder="Filter by project, description, task, or name..." value="' + escapeHtml(state.rowsFilter || '') + '">' +
       '</div>' +
       '<div class="completed-rows-scroll"><table class="data-table completed-rows-table"><thead><tr>' +
-        '<th>Time</th><th>Project</th><th>Location</th><th>Task</th><th>Group</th><th>Workflow</th><th>Completed by</th>' +
+        '<th>Time</th><th>Project</th><th>Description</th><th>Location</th><th>Task</th><th>Completed by</th>' +
       '</tr></thead><tbody id="completedRowsBody"></tbody></table></div>' +
       '<div class="completed-rows-note" id="completedRowsNote"></div>' +
       '</div>' +
@@ -1427,17 +1432,20 @@
     var body = document.getElementById('completedRowsBody');
     if (!body) return;
     var needle = (state.rowsFilter || '').trim().toLowerCase();
+    // Group/workflow aren't shown as their own columns (the group is
+    // normally already part of the task name, e.g. "LANDSCAPE REVIEW Review
+    // Cycle #2") but they're still searchable, so filtering by a group or
+    // workflow name still works.
     var shown = !needle ? rows : rows.filter(function (r) {
-      return [r.proj, r.loc, r.task, r.grp, r.wf, r.user].join(' ').toLowerCase().indexOf(needle) !== -1;
+      return [r.proj, r.desc, r.loc, r.task, r.grp, r.wf, r.user].join(' ').toLowerCase().indexOf(needle) !== -1;
     });
     body.innerHTML = shown.map(function (r) {
       return '<tr>' +
         '<td class="nowrap">' + escapeHtml(fmtClock(r.at)) + '</td>' +
-        '<td class="nowrap"><b>' + escapeHtml(r.proj || ('Project ' + (r.pid == null ? '?' : r.pid))) + '</b></td>' +
+        '<td class="proj-cell"><b>' + escapeHtml(r.proj || ('Project ' + (r.pid == null ? '?' : r.pid))) + '</b></td>' +
+        '<td class="desc-cell"><div class="clamp-2">' + escapeHtml(cleanDescription(r.desc)) + '</div></td>' +
         '<td>' + escapeHtml(r.loc || '') + '</td>' +
         '<td>' + escapeHtml(r.task || '') + '</td>' +
-        '<td>' + escapeHtml(r.grp || '') + '</td>' +
-        '<td>' + escapeHtml(r.wf || '') + '</td>' +
         '<td class="nowrap">' + escapeHtml(r.user || 'Unknown') + '</td>' +
       '</tr>';
     }).join('');
