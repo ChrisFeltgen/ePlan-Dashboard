@@ -9,9 +9,15 @@
 - `package.json` - lets cPanel's Node.js tooling recognize this as a Node app
 
 Nothing else is included on purpose - no cached data, no old CSV exports, no
-diagnostic scripts. The app creates its own cache/snapshot files the first
-time it runs, right alongside these files, and keeps updating them from
-there.
+diagnostic scripts. The app creates its own `data/` folder the first time it
+runs (cache files, the snapshot, `workload-history/`) and keeps updating it
+from there - kept separate from these five files so the app root stays just
+"the code," not a growing pile of generated files next to it. **If you're
+upgrading an existing deployment** that still has cache/snapshot files sitting
+loose in the app root from before this change, just upload the new files as
+usual - the app moves anything it finds in the old spot into `data/`
+automatically on its next run, so existing cached data and history aren't
+lost.
 
 ## 0. Verify network reachability first (do this before anything else)
 
@@ -156,7 +162,9 @@ the collector also backfill that missing information into already-recorded
 older days, a few per refresh (same budget as `HISTORY_MAX_NEW_DAYS_PER_RUN`).
 It's safe to leave set indefinitely - once every recorded day has caught up,
 it's a cheap no-op each refresh - but there's no need to keep it once the
-history folder has stopped changing after a refresh or two.
+history folder has stopped changing after a refresh or two. **Remember to
+click Save on the variable itself in cPanel** - it's easy to add the row and
+not notice it never actually saved.
 
 ## Troubleshooting
 

@@ -39,6 +39,28 @@
     --series-accepted: #1baf7a; /* categorical slot 3 - aqua */
     --status-critical: #d03b3b; /* reserved status color - overdue flag, never a category */
     --status-warning:  #a15c00; /* reserved status color - due today/soon flag */
+    /* Workflow-identity colors for the daily completions chart (Stack by:
+       Workflow) - blue (the same slot 1 as --series-pending, chosen on
+       request), orange, violet and yellow (the palette's other 3 unused
+       slots), in this exact order because it's the one ordering of these
+       four that clears the validator's adjacent-pair CVD and normal-vision
+       floors in both themes (yellow next to orange fails that check - see
+       validate_palette.js). Assigned by workflowOrderRank, so a given
+       workflow keeps the same color everywhere, never cycled; a 5th
+       workflow (rank 4+) falls to --wf-other instead of reusing a slot.
+       Within each workflow's chart segment, Reviews vs Routing is a second,
+       lightness-only encoding (a tint of the same hue vs the full hue) -
+       not a second independent hue per type, which would mean 8 hues to
+       keep straight instead of 4. Reusing the exact Routing-blue hue for
+       Building's identity is intentional (its own legend names it, right
+       under the chart) rather than a coincidence to avoid. Yellow reads
+       under 3:1 against the light surface, so the chart always carries a
+       text legend/tooltip alongside color. */
+    --wf-0: #2a78d6; /* Building Permit Review - blue */
+    --wf-1: #eda100; /* Planning and Zoning Review - yellow */
+    --wf-2: #4a3aa7; /* BSIP Review - violet */
+    --wf-3: #eb6834; /* Private Provider Registration Review - orange */
+    --wf-other: #7c8a90;
     /* City of Pompano Beach brand colors, confirmed live from
        pompanobeachfl.gov (buttons, header bands, sidebar headers, links all
        use rgb(42,118,141); the bright cyan accent is rgb(0,157,194)). Used
@@ -63,6 +85,7 @@
       --series-accepted: #199e70;
       --status-critical: #e66767;
       --status-warning:  #d99a3d;
+      --wf-0: #3987e5; --wf-1: #c98500; --wf-2: #9085e9; --wf-3: #d95926; --wf-other: #898781;
       --brand-primary:       #4a94ab;
       --brand-primary-hover: #5ea8bf;
       --brand-accent:        #33b8d9;
@@ -83,6 +106,7 @@
     --series-accepted: #199e70;
     --status-critical: #e66767;
     --status-warning:  #d99a3d;
+    --wf-0: #3987e5; --wf-1: #c98500; --wf-2: #9085e9; --wf-3: #d95926; --wf-other: #898781;
     --brand-primary:       #4a94ab;
     --brand-primary-hover: #5ea8bf;
     --brand-accent:        #33b8d9;
@@ -529,11 +553,38 @@
   .completed-period-note { font-size: 12px; color: var(--status-warning); margin-top: 8px; }
   /* Per-day totals for a range; a hatched gap = no history recorded for that
      day (distinct from a real zero, which draws as a minimal-height bar). */
-  .completed-daily-strip { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin: 4px 0 2px; }
+  .completed-daily-strip { display: flex; align-items: flex-end; gap: 2px; height: 176px; margin: 4px 0 2px; }
   .completed-daily-col { flex: 1 1 0; min-width: 2px; height: 100%; display: flex; align-items: flex-end; }
   .completed-daily-col.missing { background: repeating-linear-gradient(45deg, transparent 0 3px, var(--gridline) 3px 4px); }
-  .completed-daily-bar { width: 100%; background: var(--series-accepted); border-radius: 2px 2px 0 0; }
-  .completed-daily-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-bottom: 14px; }
+  .completed-daily-bar { width: 100%; background: var(--series-accepted); border-radius: 2px 2px 0 0; overflow: hidden; }
+  /* A recorded zero (an actual quiet day, not "no history yet") is a flat
+     3px grey tick, not a colored bar on the same height floor a real-but-
+     tiny count gets - grey so it can't be mistaken for a small amount of
+     real activity, and short enough to visibly read as less than the
+     shortest colored bar next to it. */
+  .completed-daily-bar-zero { width: 100%; height: 3px; background: var(--baseline); border-radius: 2px 2px 0 0; }
+  /* Stacked segments fill bottom-to-top (column-reverse) in wfNames/type
+     order, each a flex item sized by its own share (height:N% of the
+     column's total, not of the bar - a flex basis, not an absolute), with a
+     thin surface-colored seam between segments (the skill's "2px gap
+     between stacked fills" - border rather than margin so it doesn't eat
+     into either segment's own height). */
+  .completed-daily-bar-stack { display: flex; flex-direction: column-reverse; }
+  .completed-daily-seg { width: 100%; }
+  .completed-daily-seg + .completed-daily-seg { border-bottom: 1px solid var(--surface-1); }
+  .completed-daily-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-bottom: 10px; }
+  .daily-strip-head { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+  /* Same button recipe as every other segmented toggle on the page
+     (.controls-panel .view-toggle button) - it used to be its own smaller
+     size, which read as a different, lesser control next to Period/View by
+     right above it instead of a sibling of the same family. */
+  .daily-stack-toggle button { height: 36px; padding: 0 14px; background: var(--surface-1); }
+  .daily-stack-toggle button.active { background: var(--brand-primary); }
+  .daily-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 12px; color: var(--text-secondary); margin: 0 0 14px; }
+  .daily-legend-item { display: flex; align-items: center; gap: 6px; }
+  .daily-legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .daily-legend-pair { display: flex; gap: 2px; }
+  .daily-legend-note { font-size: 11px; color: var(--text-muted); }
   /* Single-day list of the individual reviews completed. */
   .completed-rows-section { margin-top: 20px; }
   .completed-rows-toggle { display: flex; align-items: center; gap: 6px; background: none; border: 0; padding: 6px 0; cursor: pointer; color: var(--brand-primary); font: inherit; font-weight: 600; font-size: 13.5px; margin-top: 6px; }
@@ -865,13 +916,13 @@
 
 <script>
 (function () {
-  var SNAPSHOT_URL = 'workload-snapshot.json';
+  var SNAPSHOT_URL = 'data/workload-snapshot.json';
   var AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
   var STALE_AFTER_MIN = 60; // flag if the collector hasn't run in over an hour
 
   var state = { data: null, view: 'chart', search: '', reviewerSearch: '', showApplicant: false, taskView: 'open', groupSort: 'name', completedView: 'workflow',
     // Completed panel period: 'today' (live snapshot) | 'day' | 'range' (both read /history)
-    period: 'today', periodDay: '', periodFrom: '', periodTo: '', history: null, rowsFilter: '', rowsOpen: false };
+    period: 'today', periodDay: '', periodFrom: '', periodTo: '', history: null, rowsFilter: '', rowsOpen: false, dailyStack: 'total' };
 
   var tooltip = document.getElementById('tooltip');
   // A Set, not a single key: filtering by reviewer name auto-opens every
@@ -911,6 +962,20 @@
     var ra = workflowOrderRank(a), rb = workflowOrderRank(b);
     if (ra !== rb) return ra - rb;
     return (a || '').localeCompare(b || '');
+  }
+  // Same rank as compareWorkflowNames, so a given workflow keeps the same
+  // color everywhere the daily chart shows it - --wf-0..--wf-3 (validated
+  // order, see the :root comment), --wf-other past that instead of reusing
+  // a slot.
+  function workflowColor(name) {
+    var r = workflowOrderRank(name);
+    return 'var(--wf-' + (r < WORKFLOW_ORDER_HINTS.length ? r : 'other') + ')';
+  }
+  // "Building Permit Review (ProjectFlow)" -> "Building Permit Review" - the
+  // "(ProjectFlow)" suffix every template carries is redundant once it's
+  // sitting in a chart legend next to 3 others that all have it too.
+  function shortWorkflowLabel(name) {
+    return (name || '').replace(/\s*\([^)]*\)\s*$/, '') || name;
   }
 
   // Same keyword-priority pattern as WORKFLOW_ORDER_HINTS, for the task
@@ -1389,22 +1454,93 @@
   }
 
   // Per-day totals for a range, as a small strip of bars (a gap where a day
-  // has no recorded history, so it can't be mistaken for a genuinely slow day).
+  // has no recorded history, so it can't be mistaken for a genuinely slow
+  // day). "Stack by: Workflow" combines BOTH breakdowns in one bar - each
+  // workflow gets its own hue (workflowColor, fixed order), and within that,
+  // Reviews vs Routing is a lightness step of the SAME hue (a tint vs the
+  // full color) rather than a second independent hue - two categorical
+  // dimensions as two independent hue sets would mean up to 8 colors to
+  // keep straight; hue-for-identity + lightness-for-type keeps it to 4.
   function renderDailyStrip(data) {
-    var counts = {};
-    (data.ByDay || []).forEach(function (d) { counts[d.Date] = d.Count; });
+    var byDate = {};
+    (data.ByDay || []).forEach(function (d) { byDate[d.Date] = d; });
     var dates = listDatesStr(data.from, data.to);
     if (dates.length < 2) return '';
-    var max = Math.max.apply(null, dates.map(function (d) { return counts[d] || 0; }).concat([1]));
-    return '<div class="completed-daily-strip" role="img" aria-label="Completed tasks per day">' +
-      dates.map(function (d) {
-        var has = counts[d] != null;
-        var h = has ? Math.max(3, Math.round((counts[d] / max) * 100)) : 0;
-        return '<div class="completed-daily-col' + (has ? '' : ' missing') + '" title="' + escapeHtml(fmtDateStr(d, true, true)) + ': ' + (has ? fmtInt(counts[d]) + ' completed' : 'no history recorded') + '">' +
-          '<div class="completed-daily-bar" style="height:' + h + '%"></div></div>';
-      }).join('') +
-    '</div>' +
-    '<div class="completed-daily-axis"><span>' + escapeHtml(fmtDateStr(dates[0], false, true)) + '</span><span>' + escapeHtml(fmtDateStr(dates[dates.length - 1], false, true)) + '</span></div>';
+    var max = Math.max.apply(null, dates.map(function (d) { var e = byDate[d]; return e ? e.Count : 0; }).concat([1]));
+    var mode = state.dailyStack || 'total';
+
+    // Workflows are only added to the legend/stack order once they're seen
+    // to have actually completed something in this range - a workflow with
+    // zero completions here doesn't earn a legend entry or a color slot.
+    var wfNames = [];
+    if (mode === 'workflow') {
+      var seen = {};
+      dates.forEach(function (d) {
+        ((byDate[d] && byDate[d].ByWorkflow) || []).forEach(function (w) {
+          if (w.Count && !seen[w.WorkflowTemplate]) { seen[w.WorkflowTemplate] = true; wfNames.push(w.WorkflowTemplate); }
+        });
+      });
+      wfNames.sort(compareWorkflowNames);
+    }
+
+    var cols = dates.map(function (d) {
+      var e = byDate[d];
+      var has = e != null;
+      var total = has ? e.Count : 0;
+      var segs = []; // [{color, count, label}], bottom of the bar first
+      if (has && total && mode === 'workflow') {
+        var byName = {};
+        (e.ByWorkflow || []).forEach(function (w) { byName[w.WorkflowTemplate] = w; });
+        wfNames.forEach(function (name) {
+          var w = byName[name];
+          if (!w || !w.Count) return;
+          var color = workflowColor(name), label = shortWorkflowLabel(name);
+          if (w.ReviewsCount) segs.push({ color: color, count: w.ReviewsCount, label: label + ' – Reviews' });
+          if (w.RoutingCount) segs.push({ color: 'color-mix(in srgb, ' + color + ' 45%, var(--surface-1))', count: w.RoutingCount, label: label + ' – Routing' });
+        });
+      }
+      // A recorded, genuinely-zero day (weekend, holiday) is NOT the same
+      // "small" as the floor a tiny nonzero count gets - both used to get
+      // forced up to the same 3% minimum, so a quiet Saturday looked as
+      // busy as a day with a couple of real completions. Zero gets its own
+      // short, flat, grey marker instead of sharing the colored bar's floor.
+      var isZero = has && total === 0;
+      var h = (has && !isZero) ? Math.max(4, Math.round((total / max) * 100)) : 0;
+      var tip = fmtDateStr(d, true, true) + ': ' + (has ? fmtInt(total) + ' completed' : 'no history recorded');
+      if (segs.length > 1) tip += '\n' + segs.map(function (s) { return s.label + ': ' + fmtInt(s.count); }).join('\n');
+      var barHtml = isZero
+        ? '<div class="completed-daily-bar completed-daily-bar-zero"></div>'
+        : (!has || !segs.length
+        ? '<div class="completed-daily-bar" style="height:' + h + '%"></div>'
+        : '<div class="completed-daily-bar completed-daily-bar-stack" style="height:' + h + '%">' +
+            segs.map(function (s) {
+              return '<div class="completed-daily-seg" style="height:' + (total ? (s.count / total * 100) : 0) + '%; background:' + s.color + '"></div>';
+            }).join('') +
+          '</div>');
+      return '<div class="completed-daily-col' + (has ? '' : ' missing') + '" title="' + escapeHtml(tip) + '">' + barHtml + '</div>';
+    }).join('');
+
+    var toggle = '<div class="daily-stack-toggle view-toggle" id="dailyStackToggle">' +
+        '<button data-stack="total"' + (mode === 'total' ? ' class="active"' : '') + '>Total</button>' +
+        '<button data-stack="workflow"' + (mode === 'workflow' ? ' class="active"' : '') + '>Workflow</button>' +
+      '</div>';
+
+    var legend = '';
+    if (mode === 'workflow' && wfNames.length) {
+      legend = '<div class="daily-legend">' + wfNames.map(function (name) {
+        var color = workflowColor(name);
+        return '<span class="daily-legend-item">' +
+          '<span class="daily-legend-pair" title="Darker = Reviews, lighter = Routing">' +
+            '<span class="daily-legend-swatch" style="background:' + color + '"></span>' +
+            '<span class="daily-legend-swatch" style="background:color-mix(in srgb, ' + color + ' 45%, var(--surface-1))"></span>' +
+          '</span>' + escapeHtml(shortWorkflowLabel(name)) + '</span>';
+      }).join('') + '<span class="daily-legend-note">Darker = Reviews &middot; Lighter = Routing</span></div>';
+    }
+
+    return '<div class="daily-strip-head"><span class="control-label">Stack by</span>' + toggle + '</div>' +
+      '<div class="completed-daily-strip" role="img" aria-label="Completed tasks per day">' + cols + '</div>' +
+      '<div class="completed-daily-axis"><span>' + escapeHtml(fmtDateStr(dates[0], false, true)) + '</span><span>' + escapeHtml(fmtDateStr(dates[dates.length - 1], false, true)) + '</span></div>' +
+      legend;
   }
 
   // The individual reviews completed on a single day, filterable by text.
@@ -1636,6 +1772,13 @@
         loadHistory();
       });
     });
+    var dailyStackToggle = document.getElementById('dailyStackToggle');
+    if (dailyStackToggle) dailyStackToggle.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        state.dailyStack = btn.getAttribute('data-stack');
+        render();
+      });
+    });
     if (dayRows && dayRows.length) {
       fillCompletedRows(dayRows);
       var rowsToggle = document.getElementById('completedRowsToggle');
@@ -1829,7 +1972,7 @@
         '</div>' +
         '<div class="completed-workflow-legend">' +
           '<span class="legend-item"><span class="swatch accepted"></span><b>' + fmtInt(w.ReviewGroups.Count) + '</b>&nbsp;Reviews</span>' +
-          '<span class="legend-item"><span class="swatch pending"></span><b>' + fmtInt(w.Operations.Count) + '</b>&nbsp;Processing</span>' +
+          '<span class="legend-item"><span class="swatch pending"></span><b>' + fmtInt(w.Operations.Count) + '</b>&nbsp;Routing</span>' +
         '</div>' +
       '</div>';
 
@@ -1841,8 +1984,8 @@
             completedGroupRows(w.ReviewGroups.ByGroup, 'review', 'No review tasks completed today.', key, groupUserMap, openCountMap) +
           '</div>' +
           '<div class="completed-bucket">' +
-            completedBucketHead('ops', 'Processing', w.Operations.Count) +
-            completedGroupRows(w.Operations.ByGroup, 'ops', 'No processing tasks completed today.', key, groupUserMap, openCountMap) +
+            completedBucketHead('ops', 'Routing', w.Operations.Count) +
+            completedGroupRows(w.Operations.ByGroup, 'ops', 'No routing tasks completed today.', key, groupUserMap, openCountMap) +
           '</div>' +
         '</div>';
       }
@@ -1863,7 +2006,7 @@
       var topUsers = showAll ? g.ByUser : g.ByUser.slice(0, 4);
       return '<div class="completed-flat-row">' +
         '<div class="completed-flat-main">' +
-          '<div class="completed-flat-title">' + escapeHtml(g.GroupName) + (g.IsOperations ? '<span class="completed-flat-badge">Processing</span>' : '') + '</div>' +
+          '<div class="completed-flat-title">' + escapeHtml(g.GroupName) + (g.IsOperations ? '<span class="completed-flat-badge">Routing</span>' : '') + '</div>' +
           '<div class="completed-flat-sub">' + escapeHtml(g.WorkflowTemplate) + '</div>' +
         '</div>' +
         '<div class="bar-track completed-flat-bar" style="cursor:default;"><div class="bar-seg ' + barCls + '" style="left:0%; width:' + pct + '%"></div></div>' +
@@ -1898,7 +2041,7 @@
         completedStaffRows(reviewers, 'ReviewGroupsCount', 'accepted') +
       '</div>' +
       '<div class="completed-staff-section">' +
-        '<h3 class="completed-detail-col-title">Processing</h3>' +
+        '<h3 class="completed-detail-col-title">Routing</h3>' +
         completedStaffRows(processing, 'OperationsCount', 'pending') +
       '</div>';
   }

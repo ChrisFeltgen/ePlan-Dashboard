@@ -13,19 +13,43 @@ const { fork } = require('child_process');
 const ROOT = __dirname;
 const BASE_URL = 'https://pompanobeach-fl-us-projectdoxwebapi.avolvecloud.com';
 
+// Every cache/snapshot/history file this app maintains lives under
+// ROOT/data, not loose in the app root next to collector.js/server.js/
+// workload-dashboard.html - keeps "the code" and "the data this code has
+// accumulated" visually and operationally separate (e.g. so a cPanel File
+// Manager listing of the app root isn't 20+ generated files deep, and so
+// it's obvious at a glance what's safe to delete vs what's the app itself).
+const DATA_DIR = path.join(ROOT, 'data');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+// One-time migration for an existing deployment upgrading from before this
+// /data/ split: if a cache/history file/folder is still sitting in the old
+// spot (app root) and hasn't already been moved, move it rather than start
+// over - losing the report-tables cache or months of backfilled history to
+// a mere file-layout change would be a real regression, not a fresh start.
+// Best-effort: any failure here just means that one file rebuilds from
+// scratch in the new location instead of the run crashing.
+function migrateLegacyDataFile(oldPath, newPath) {
+  try {
+    if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) fs.renameSync(oldPath, newPath);
+  } catch (e) { /* rebuilds fresh in the new location instead */ }
+}
+
 // Fallback only, for the rare case a live Project/GetProject lookup fails -
 // not the primary source any more (see PROJECT_CACHE_JSON below). This was a
 // one-time Sept 15 snapshot with no automatic refresh, which is exactly what
 // made project name/status go stale.
-const PROJECT_LIST_CSV = path.join(ROOT, 'projectdox-raw-pull-20260915-230752.csv');
-const INSTANCE_CACHE_JSON = path.join(ROOT, 'workload-instance-cache.json');
-const USER_CACHE_JSON = path.join(ROOT, 'workload-user-cache.json');
-const PROJECT_CACHE_JSON = path.join(ROOT, 'workload-project-cache.json');
-const REVISION_INSTANCES_CACHE_JSON = path.join(ROOT, 'workload-revision-instances-cache.json');
-const REPORT_TABLES_CACHE_JSON = path.join(ROOT, 'workload-report-tables-cache.json');
-const COMPLETED_TODAY_CACHE_JSON = path.join(ROOT, 'workload-completed-today-cache.json');
-const SNAPSHOT_JSON = path.join(ROOT, 'workload-snapshot.json');
-const DETAIL_CSV = path.join(ROOT, 'workload-detail-latest.csv');
+const PROJECT_LIST_CSV = path.join(DATA_DIR, 'projectdox-raw-pull-20260915-230752.csv');
+const INSTANCE_CACHE_JSON = path.join(DATA_DIR, 'workload-instance-cache.json');
+const USER_CACHE_JSON = path.join(DATA_DIR, 'workload-user-cache.json');
+const PROJECT_CACHE_JSON = path.join(DATA_DIR, 'workload-project-cache.json');
+const REVISION_INSTANCES_CACHE_JSON = path.join(DATA_DIR, 'workload-revision-instances-cache.json');
+const REPORT_TABLES_CACHE_JSON = path.join(DATA_DIR, 'workload-report-tables-cache.json');
+const COMPLETED_TODAY_CACHE_JSON = path.join(DATA_DIR, 'workload-completed-today-cache.json');
+const SNAPSHOT_JSON = path.join(DATA_DIR, 'workload-snapshot.json');
+const DETAIL_CSV = path.join(DATA_DIR, 'workload-detail-latest.csv');
+[PROJECT_LIST_CSV, INSTANCE_CACHE_JSON, USER_CACHE_JSON, PROJECT_CACHE_JSON, REVISION_INSTANCES_CACHE_JSON,
+  REPORT_TABLES_CACHE_JSON, COMPLETED_TODAY_CACHE_JSON, SNAPSHOT_JSON, DETAIL_CSV]
+  .forEach((newPath) => migrateLegacyDataFile(path.join(ROOT, path.basename(newPath)), newPath));
 
 // Bump this whenever a field gets added to what an instance/project/revision/
 // report-tables cache entry stores (like Revision was, then the wider
@@ -518,12 +542,14 @@ function createCompletedSummary() {
 // which keeps memory flat on the memory-limited host regardless of how long
 // a range is.
 
-const HISTORY_DIR = path.join(ROOT, 'workload-history');
+const HISTORY_DIR = path.join(DATA_DIR, 'workload-history');
+migrateLegacyDataFile(path.join(ROOT, 'workload-history'), HISTORY_DIR);
 // Permanent lookups for history (project number/location never change, unlike
 // the short-TTL projectCache which also carries mutable Status), plus short
 // negative caches so a since-deleted user/project/instance isn't re-requested
 // (and re-failing) on every single refresh.
-const HISTORY_LOOKUPS_JSON = path.join(ROOT, 'workload-history-lookups.json');
+const HISTORY_LOOKUPS_JSON = path.join(DATA_DIR, 'workload-history-lookups.json');
+migrateLegacyDataFile(path.join(ROOT, 'workload-history-lookups.json'), HISTORY_LOOKUPS_JSON);
 // How far back the collector keeps history for (it backfills toward this a
 // few days per refresh; see HISTORY_MAX_NEW_DAYS_PER_RUN), overridable.
 const HISTORY_DAYS = Math.max(1, parseInt(process.env.HISTORY_DAYS || '90', 10) || 90);
@@ -624,6 +650,22 @@ function dayNeedsSchemaBackfill(date) {
 function historyRowToSummaryRow(h) {
   return { WorkflowTemplate: h.wf, GroupName: h.grp, UserID: h.uid, UserName: h.user, TaskName: h.task };
 }
+// Per-day, per-workflow breakdown (plus the Reviews/Operations split within
+// each) for the daily strip chart - a lighter-weight tally than
+// createCompletedSummary(), which also builds ByUser/ByTask breakdowns this
+// chart has no use for. Rows are already self-service-filtered at write time
+// (see SELF_SERVICE_GROUP_RE at pushRow), so nothing to exclude here.
+function tallyDayByWorkflow(rows) {
+  const byWf = new Map();
+  for (const h of rows) {
+    const wf = h.wf || 'Unknown';
+    if (!byWf.has(wf)) byWf.set(wf, { WorkflowTemplate: wf, Count: 0, ReviewsCount: 0, RoutingCount: 0 });
+    const e = byWf.get(wf);
+    e.Count++;
+    if (OPERATIONS_GROUP_RE.test((h.grp || '').trim())) e.RoutingCount++; else e.ReviewsCount++;
+  }
+  return [...byWf.values()].sort((a, b) => b.Count - a.Count || a.WorkflowTemplate.localeCompare(b.WorkflowTemplate));
+}
 
 // Summary (and, for a single day, the task list) for an inclusive date range,
 // read from the day files one at a time. Returns which days in the range have
@@ -641,7 +683,7 @@ async function readHistoryRange(from, to, opts = {}) {
     const day = await fs.promises.readFile(historyFile(date), 'utf8').then((s) => JSON.parse(stripBom(s))).catch(() => null);
     if (!day || !Array.isArray(day.rows)) { missingDays.push(date); continue; }
     for (const h of day.rows) acc.add(historyRowToSummaryRow(h));
-    byDay.push({ Date: date, Count: day.rows.length });
+    byDay.push({ Date: date, Count: day.rows.length, ByWorkflow: tallyDayByWorkflow(day.rows) });
     if (includeRows) for (const h of day.rows) rows.push(h);
   }
   if (includeRows) rows.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
@@ -1481,7 +1523,7 @@ async function runCollector(opts = {}) {
         const prev = byId.get(String(r.id));
         // Keep a previously-resolved name/project if this run couldn't resolve it.
         const merged = toHistoryRow(r);
-        if (prev) { for (const k of ['user', 'proj', 'loc']) if (!merged[k] && prev[k]) merged[k] = prev[k]; }
+        if (prev) { for (const k of ['user', 'proj', 'loc', 'desc']) if (!merged[k] && prev[k]) merged[k] = prev[k]; }
         byId.set(String(r.id), merged);
       }
       const rows = [...byId.values()].sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
