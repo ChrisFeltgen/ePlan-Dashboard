@@ -6,3 +6,9 @@ data/
 workload-probe-*.json
 node_modules/
 .claude/worktrees/
+# Server copy and runtime output (not source)
+web/
+stderr.log
+tmp/
+public/
+node_modules/

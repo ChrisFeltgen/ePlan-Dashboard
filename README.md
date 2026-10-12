@@ -3,16 +3,18 @@
 Staff dashboard for ePlan (ProjectDox) review workload for the City of Pompano Beach.
 
 ## Contents
-- `workload-dashboard.html` - the dashboard page (reads `data/workload-snapshot.json`)
-- `collector.js` - Node port of `Get-WorkloadSnapshot.ps1`; pulls ProjectDox data, writes snapshot and caches under `data/`
-- `Get-WorkloadSnapshot.ps1` / `Get-ProjectDoxReviewWorkload.ps1` - original PowerShell collectors
-- `Register-WorkloadScheduledTask.ps1` - registers the scheduled refresh task
-- `Investigate-Workload*.ps1` - data-source investigation scripts
-- `.preview-server.js` - zero-dependency static server for local preview (port 5757)
+- `server.js` - entry point; serves the dashboard and JSON snapshot, and handles `/refresh`, `/refresh-status` and `/history`. Run with `npm start` (port 5757 by default).
+- `collector.js` - pulls ProjectDox data and writes the snapshot and caches under `data/`
+- `workload-dashboard.html` - the dashboard page
+- `package.json` / `DEPLOY-README.md` - deploy metadata and steps (copied from the server)
+- `Get-WorkloadSnapshot.ps1` / `Get-ProjectDoxReviewWorkload.ps1` - original PowerShell collectors (candidates for removal)
+- `Register-WorkloadScheduledTask.ps1` - scheduled refresh task (candidate for removal)
+- `Investigate-Workload*.ps1` - data-source investigation scripts (candidates for removal)
+- `.preview-server.js` - static-only preview server, superseded by `server.js` (candidate for removal)
 
 ## Configuration
-Requires `PROJECTDOX_ADMIN_EMAIL` and `PROJECTDOX_ADMIN_PASSWORD` environment variables.
+- `PROJECTDOX_ADMIN_EMAIL` / `PROJECTDOX_ADMIN_PASSWORD` - required for the collector
+- `DASHBOARD_USER` / `DASHBOARD_PASSWORD` - enable login; the server currently runs without one
 
 ## Notes
-- `data/` is generated at runtime and is git-ignored.
-- `server.js` (the `/refresh` handler that `collector.js` is called from) is not in this repo yet.
+- `data/`, `stderr.log`, `tmp/`, `public/`, `node_modules/` and the `web/` server copy are git-ignored.
