@@ -117,8 +117,9 @@ function readJsonSafe(filePath, fallback) {
   }
 }
 
-function writeJson(filePath, obj) {
-  fs.writeFileSync(filePath, JSON.stringify(obj, null, 2), 'utf8'); // utf8 with no BOM, unlike PowerShell's Out-File
+function writeJson(filePath, obj, { compact = false } = {}) {
+  // compact: for files the browser downloads and parses (indentation is ~30% of the snapshot's size)
+  fs.writeFileSync(filePath, compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2), 'utf8'); // utf8 with no BOM, unlike PowerShell's Out-File
 }
 
 function parseCsvLine(line) {
@@ -1706,7 +1707,7 @@ async function runCollector(opts = {}) {
     CompletedTodaySummary: completedTodaySummary,
     Groups: summary
   };
-  writeJson(SNAPSHOT_JSON, snapshot);
+  writeJson(SNAPSHOT_JSON, snapshot, { compact: true });
 
   // History is a bonus on top of the snapshot that's already been written -
   // a failure here must never fail (or hide) a refresh whose main job

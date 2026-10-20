@@ -12,6 +12,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { runCollector, readHistoryRange, isValidDateStr, listDates, easternToday, HISTORY_MAX_RANGE_DAYS } = require('./collector');
 
 const ROOT = __dirname;
@@ -67,6 +68,8 @@ function isAuthorized(req) {
 }
 
 const MIME = { '.html': 'text/html', '.json': 'application/json', '.js': 'text/javascript', '.css': 'text/css' };
+const COMPRESSIBLE = new Set(['.html', '.json', '.js', '.css']);
+const compressedCache = new Map(); // "encoding:path" -> { etag, body }
 
 let refreshInFlight = null; // Promise, so concurrent requests share one run instead of stacking
 let lastRefreshFinishedAt = 0;
@@ -136,26 +139,68 @@ async function handleHistory(rawUrl, res) {
   sendJson(res, 200, Object.assign({ ok: true, Today: today }, result));
 }
 
-function serveStatic(url, res, rawUrl) {
+function serveStatic(req, url, res, rawUrl) {
   let filePath = path.join(ROOT, decodeURIComponent(url.split('?')[0]));
   if (url === '/') filePath = path.join(ROOT, 'workload-dashboard.html');
   if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
 
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      // TEMP DIAG - root-causing the cPanel subpath 404; safe to leave (no
-      // secrets), but trim back to plain "Not found" once this is resolved.
-      res.end(`Not found. [diag] rawUrl=${JSON.stringify(rawUrl)} BASE_PATH=${JSON.stringify(BASE_PATH)} strippedUrl=${JSON.stringify(url)} filePath=${JSON.stringify(filePath)}`);
+  fs.stat(filePath, (statErr, stat) => {
+    if (statErr || !stat.isFile()) { sendNotFound(res, rawUrl, url, filePath); return; }
+    const ext = path.extname(filePath);
+    // Weak-ish validator from mtime+size: changes whenever the collector
+    // rewrites the file, so clients always see fresh data but an unchanged
+    // 5 MB snapshot costs a bodyless 304 on each poll.
+    const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+    const headers = {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      // no-cache = may store, but must revalidate every time. Keeps the old
+      // "never show a stale page after an edit" guarantee of no-store.
+      'Cache-Control': 'no-cache',
+      'ETag': etag,
+      'Vary': 'Accept-Encoding'
+    };
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return; }
+
+    const accept = req.headers['accept-encoding'] || '';
+    const encoding = !COMPRESSIBLE.has(ext) ? null : /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : null;
+    if (!encoding) {
+      fs.readFile(filePath, (err, data) => {
+        if (err) { sendNotFound(res, rawUrl, url, filePath); return; }
+        res.writeHead(200, headers);
+        res.end(data);
+      });
       return;
     }
-    const ext = path.extname(filePath);
-    // No caching: this file gets edited frequently, and a stale cached copy
-    // in the browser (showing old columns/layout after an update) is a much
-    // more confusing failure mode than re-fetching a few KB on every load.
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' });
-    res.end(data);
+    // Compressed copies are cached per file+encoding until the file changes,
+    // so a 5 MB snapshot is compressed once per collector run, not per request.
+    const cacheKey = `${encoding}:${filePath}`;
+    const cached = compressedCache.get(cacheKey);
+    const send = (body) => {
+      res.writeHead(200, Object.assign({ 'Content-Encoding': encoding, 'Content-Length': body.length }, headers));
+      res.end(body);
+    };
+    if (cached && cached.etag === etag) { send(cached.body); return; }
+    fs.readFile(filePath, (err, data) => {
+      if (err) { sendNotFound(res, rawUrl, url, filePath); return; }
+      const done = (zErr, body) => {
+        if (zErr) { res.writeHead(200, headers); res.end(data); return; }
+        compressedCache.set(cacheKey, { etag, body });
+        send(body);
+      };
+      if (encoding === 'br') {
+        zlib.brotliCompress(data, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }, done);
+      } else {
+        zlib.gzip(data, { level: 6 }, done);
+      }
+    });
   });
+}
+
+function sendNotFound(res, rawUrl, url, filePath) {
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  // TEMP DIAG - root-causing the cPanel subpath 404; safe to leave (no
+  // secrets), but trim back to plain "Not found" once this is resolved.
+  res.end(`Not found. [diag] rawUrl=${JSON.stringify(rawUrl)} BASE_PATH=${JSON.stringify(BASE_PATH)} strippedUrl=${JSON.stringify(url)} filePath=${JSON.stringify(filePath)}`);
 }
 
 const server = http.createServer((req, res) => {
@@ -232,7 +277,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  serveStatic(url, res, req.url);
+  serveStatic(req, url, res, req.url);
 });
 
 server.listen(PORT, () => {

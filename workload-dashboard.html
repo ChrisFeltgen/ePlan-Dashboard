@@ -1205,10 +1205,27 @@
     return days + ' day' + (days === 1 ? '' : 's') + ' ago';
   }
 
+  var lastSnapshotEtag = null;
+
   function load() {
-    fetch(SNAPSHOT_URL, { cache: 'no-store' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    // 'no-cache' = always revalidate with the server (If-None-Match), so an
+    // unchanged snapshot costs a ~200 byte 304 instead of the full body; the
+    // server's ETag also lets us skip re-parsing the JSON below.
+    fetch(SNAPSHOT_URL, { cache: 'no-cache' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var etag = r.headers.get('ETag');
+        if (etag && etag === lastSnapshotEtag && state.data) return null;
+        lastSnapshotEtag = etag;
+        return r.json();
+      })
       .then(function (json) {
+        if (json === null) {
+          // Unchanged snapshot: skip the table/chart rebuild, just keep the
+          // "Updated X min ago" text and stale badge current.
+          updateFreshness();
+          return;
+        }
         state.data = json;
         document.getElementById('loadingState').style.display = 'none';
         document.getElementById('errorState').style.display = 'none';
@@ -1435,15 +1452,21 @@
   });
   updateThemeToggleButton(effectiveTheme());
 
-  function render() {
+  function updateFreshness() {
     var data = state.data;
     if (!data) return;
-
     var genDate = new Date(data.GeneratedAt);
     document.getElementById('generatedMeta').textContent =
       'Updated ' + timeAgo(data.GeneratedAt) + ' (' + genDate.toLocaleString() + ')';
     var staleMin = (Date.now() - genDate.getTime()) / 60000;
     document.getElementById('staleBadge').style.display = staleMin > STALE_AFTER_MIN ? 'inline-block' : 'none';
+  }
+
+  function render() {
+    var data = state.data;
+    if (!data) return;
+
+    updateFreshness();
 
     var groups = data.Groups || [];
     var visible = groups.filter(function (g) {
