@@ -1302,6 +1302,7 @@
   var REFRESH_MILESTONE_PCTS = REFRESH_MILESTONES.map(function (m) { return m[1]; })
     .filter(function (p, i, a) { return a.indexOf(p) === i; }).sort(function (a, b) { return a - b; });
   var refreshProgressShown = 0;
+  var refreshLogAll = []; // every log line received for the current/last run (server sends only new ones)
 
   function refreshMilestonePct(logLines) {
     var pct = 0;
@@ -1356,16 +1357,20 @@
   // a stale "Refreshing..." (the server keeps reporting elapsed time long
   // after a run ends).
   function pollStatus(token) {
-    fetch('refresh-status')
+    // Ask only for log lines we haven't seen; the server's full log can be
+    // 200 lines and this runs every ~1s for the length of a refresh.
+    fetch('refresh-status?since=' + refreshLogAll.length)
       .then(function (r) { return r.json(); })
       .then(function (s) {
-        if (s.log && s.log.length) {
+        if (s.logReset) refreshLogAll = [];
+        if (s.log && s.log.length) refreshLogAll = refreshLogAll.concat(s.log);
+        if (refreshLogAll.length) {
           refreshLogToggle.style.display = 'inline';
-          if (logPanelOpen) renderLogPanel(s.log);
+          if (logPanelOpen && s.log && s.log.length) renderLogPanel(refreshLogAll);
         }
         if (token !== activeRefreshToken) return; // superseded - the refresh this poll was tracking already finished
         if (!s.refreshing) return;
-        renderRefreshProgress(advanceRefreshProgress(s.log), s.elapsedSeconds);
+        renderRefreshProgress(advanceRefreshProgress(refreshLogAll), s.elapsedSeconds);
       })
       .catch(function () { /* transient poll failure - next tick will retry, nothing to show the user for one miss */ });
   }
@@ -1374,7 +1379,7 @@
     logPanelOpen = !logPanelOpen;
     refreshLogToggle.textContent = logPanelOpen ? 'Hide details' : 'Show details';
     refreshLogPanel.style.display = logPanelOpen ? 'block' : 'none';
-    if (logPanelOpen) pollStatus(activeRefreshToken);
+    if (logPanelOpen) { renderLogPanel(refreshLogAll); pollStatus(activeRefreshToken); }
   });
 
   function doRefresh() {
@@ -1386,6 +1391,7 @@
     refreshSpinner.style.display = 'inline-block';
     document.getElementById('errorState').style.display = 'none';
     refreshProgressShown = 0;
+    refreshLogAll = [];
     renderRefreshProgress(0, 0);
     pollTimer = setInterval(function () { pollStatus(myToken); }, 1200);
     pollStatus(myToken);
@@ -2529,7 +2535,9 @@
   });
 
   load();
-  setInterval(load, AUTO_REFRESH_MS);
+  // Skip polls while the tab is hidden/minimized; catch up as soon as it's visible again.
+  setInterval(function () { if (!document.hidden) load(); }, AUTO_REFRESH_MS);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
 })();
 </script>
 

@@ -75,6 +75,7 @@ let refreshInFlight = null; // Promise, so concurrent requests share one run ins
 let lastRefreshFinishedAt = 0;
 let refreshStartedAt = null;
 let refreshLog = []; // collector.js's own log() lines from the current/last run, for /refresh-status to expose
+let refreshLogTotal = 0; // lines pushed this run, including any shifted out of refreshLog
 const REFRESH_LOG_MAX_LINES = 200;
 
 function triggerRefresh() {
@@ -87,11 +88,13 @@ function triggerRefresh() {
 
   refreshStartedAt = Date.now();
   refreshLog = [];
+  refreshLogTotal = 0;
 
   refreshInFlight = runCollector({
     log: (msg) => {
       console.log('[collector]', msg);
       refreshLog.push({ t: Date.now(), msg });
+      refreshLogTotal++;
       if (refreshLog.length > REFRESH_LOG_MAX_LINES) refreshLog.shift();
     }
   })
@@ -103,6 +106,7 @@ function triggerRefresh() {
     .catch((err) => {
       refreshInFlight = null;
       refreshLog.push({ t: Date.now(), msg: `ERROR: ${err.message}` });
+      refreshLogTotal++;
       throw err;
     });
 
@@ -111,7 +115,17 @@ function triggerRefresh() {
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  const headers = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Vary': 'Accept-Encoding' };
+  // Small bodies (status polls, errors) aren't worth the CPU; larger ones (history ranges) compress ~10x.
+  if (body.length > 1024 && /\bgzip\b/.test((res.req && res.req.headers['accept-encoding']) || '')) {
+    zlib.gzip(body, (err, zipped) => {
+      if (err) { res.writeHead(status, headers); res.end(body); return; }
+      res.writeHead(status, Object.assign({ 'Content-Encoding': 'gzip', 'Content-Length': zipped.length }, headers));
+      res.end(zipped);
+    });
+    return;
+  }
+  res.writeHead(status, headers);
   res.end(body);
 }
 
@@ -261,13 +275,22 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (url === '/refresh-status' && req.method === 'GET') {
+  if (url.split('?')[0] === '/refresh-status' && req.method === 'GET') {
+    // ?since=N: the caller already has the first N log lines of this run, so
+    // send only the rest (the page polls every ~1s; resending the whole log
+    // each time dominated the traffic of a long refresh). logTotal lets it
+    // track what it has; a since beyond logTotal means a new run started.
+    const since = parseInt(new URL(url, 'http://localhost').searchParams.get('since') || '0', 10) || 0;
+    const firstHeld = refreshLogTotal - refreshLog.length; // ring buffer may have dropped the oldest lines
+    const from = since > refreshLogTotal ? firstHeld : Math.max(since, firstHeld);
     sendJson(res, 200, {
       refreshing: !!refreshInFlight,
       lastRefreshFinishedAt: lastRefreshFinishedAt || null,
       startedAt: refreshStartedAt,
       elapsedSeconds: refreshStartedAt ? Math.round((Date.now() - refreshStartedAt) / 1000) : null,
-      log: refreshLog
+      logTotal: refreshLogTotal,
+      logReset: since > refreshLogTotal,
+      log: refreshLog.slice(from - firstHeld)
     });
     return;
   }
