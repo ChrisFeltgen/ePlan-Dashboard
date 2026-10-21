@@ -14,7 +14,7 @@ Staff dashboard for ePlan (ProjectDox) review workload for the City of Pompano B
 
 ## Configuration
 - `PROJECTDOX_ADMIN_EMAIL` / `PROJECTDOX_ADMIN_PASSWORD` - required for the collector
-- `DASHBOARD_USER` / `DASHBOARD_PASSWORD` - enable login; the server currently runs without one
+- `DASHBOARD_USER` / `DASHBOARD_PASSWORD` - required: the server refuses to start without them. For local development only, set `ALLOW_NO_AUTH=1` to run without a login
 
 ## Notes
 - `data/`, `stderr.log`, `tmp/`, `public/`, `node_modules/` and the `web/` server copy are git-ignored.

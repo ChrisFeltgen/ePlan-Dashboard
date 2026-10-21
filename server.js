@@ -58,6 +58,15 @@ const DASHBOARD_USER = process.env.DASHBOARD_USER || '';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const AUTH_ENABLED = !!(DASHBOARD_USER && DASHBOARD_PASSWORD);
 
+// Fail closed: a forgotten or typo'd credential variable must not silently
+// leave the dashboard open. Running without a login needs an explicit
+// ALLOW_NO_AUTH=1 (local development).
+if (!AUTH_ENABLED && process.env.ALLOW_NO_AUTH !== '1') {
+  const missing = [!DASHBOARD_USER && 'DASHBOARD_USER', !DASHBOARD_PASSWORD && 'DASHBOARD_PASSWORD'].filter(Boolean).join(' and ');
+  console.error(`FATAL: ${missing} not set. Set both to require a login, or set ALLOW_NO_AUTH=1 to run without one (local development only).`);
+  process.exit(1);
+}
+
 function isAuthorized(req) {
   const header = req.headers['authorization'] || '';
   const [scheme, encoded] = header.split(' ');
@@ -334,7 +343,7 @@ server.listen(PORT, () => {
   if (AUTH_ENABLED) {
     console.log('HTTP Basic Auth: ENABLED (DASHBOARD_USER/DASHBOARD_PASSWORD are set).');
   } else {
-    console.warn('WARNING: DASHBOARD_USER / DASHBOARD_PASSWORD are not set - this app is running WITHOUT a login. Fine on a trusted local/office network; set both before exposing it publicly.');
+    console.warn('WARNING: running WITHOUT a login (ALLOW_NO_AUTH=1). Local development only - never expose this publicly.');
   }
   if (AUTO_REFRESH_MINUTES > 0) {
     console.log(`Auto-refresh:  ENABLED, every ${AUTO_REFRESH_MINUTES} minute(s).`);
