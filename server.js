@@ -13,6 +13,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const { runCollector, readHistoryRange, isValidDateStr, listDates, easternToday, HISTORY_MAX_RANGE_DAYS } = require('./collector');
 
 const ROOT = __dirname;
@@ -57,6 +58,15 @@ const DASHBOARD_USER = process.env.DASHBOARD_USER || '';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const AUTH_ENABLED = !!(DASHBOARD_USER && DASHBOARD_PASSWORD);
 
+// Fail closed: a forgotten or typo'd credential variable must not silently
+// leave the dashboard open. Running without a login needs an explicit
+// ALLOW_NO_AUTH=1 (local development).
+if (!AUTH_ENABLED && process.env.ALLOW_NO_AUTH !== '1') {
+  const missing = [!DASHBOARD_USER && 'DASHBOARD_USER', !DASHBOARD_PASSWORD && 'DASHBOARD_PASSWORD'].filter(Boolean).join(' and ');
+  console.error(`FATAL: ${missing} not set. Set both to require a login, or set ALLOW_NO_AUTH=1 to run without one (local development only).`);
+  process.exit(1);
+}
+
 function isAuthorized(req) {
   const header = req.headers['authorization'] || '';
   const [scheme, encoded] = header.split(' ');
@@ -64,10 +74,31 @@ function isAuthorized(req) {
   const decoded = Buffer.from(encoded, 'base64').toString('utf8');
   const sep = decoded.indexOf(':');
   if (sep === -1) return false;
-  return decoded.slice(0, sep) === DASHBOARD_USER && decoded.slice(sep + 1) === DASHBOARD_PASSWORD;
+  // Both compared unconditionally (no short-circuit) so timing doesn't reveal which half was wrong.
+  const userOk = safeEqual(decoded.slice(0, sep), DASHBOARD_USER);
+  const passOk = safeEqual(decoded.slice(sep + 1), DASHBOARD_PASSWORD);
+  return userOk && passOk;
 }
 
-const MIME = { '.html': 'text/html', '.json': 'application/json', '.js': 'text/javascript', '.css': 'text/css' };
+// Constant-time string compare; hashing first makes the buffers equal length.
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// Only these files are ever served. The app root also holds server code, and
+// data/ holds caches, history and CSVs with project/reviewer details - none of
+// that should be downloadable. The page itself needs just the HTML, the logo
+// and the snapshot.
+const STATIC_ALLOWLIST = new Map([
+  ['/', 'workload-dashboard.html'],
+  ['/workload-dashboard.html', 'workload-dashboard.html'],
+  ['/copb-logo.png', 'copb-logo.png'],
+  ['/data/workload-snapshot.json', path.join('data', 'workload-snapshot.json')]
+]);
+
+const MIME = { '.png': 'image/png', '.html': 'text/html', '.json': 'application/json', '.js': 'text/javascript', '.css': 'text/css' };
 const COMPRESSIBLE = new Set(['.html', '.json', '.js', '.css']);
 const compressedCache = new Map(); // "encoding:path" -> { etag, body }
 
@@ -83,7 +114,7 @@ function triggerRefresh() {
 
   const secondsSinceLast = (Date.now() - lastRefreshFinishedAt) / 1000;
   if (lastRefreshFinishedAt && secondsSinceLast < MIN_SECONDS_BETWEEN_REFRESHES) {
-    return Promise.reject(new Error(`A refresh finished ${Math.round(secondsSinceLast)}s ago - please wait a bit before triggering another (min ${MIN_SECONDS_BETWEEN_REFRESHES}s apart).`));
+    return Promise.reject(Object.assign(new Error(`A refresh finished ${Math.round(secondsSinceLast)}s ago - please wait a bit before triggering another (min ${MIN_SECONDS_BETWEEN_REFRESHES}s apart).`), { clientSafe: true }));
   }
 
   refreshStartedAt = Date.now();
@@ -105,7 +136,8 @@ function triggerRefresh() {
     })
     .catch((err) => {
       refreshInFlight = null;
-      refreshLog.push({ t: Date.now(), msg: `ERROR: ${err.message}` });
+      console.error('[collector] refresh failed:', err);
+      refreshLog.push({ t: Date.now(), msg: `ERROR: ${clientMessage(err)}` });
       refreshLogTotal++;
       throw err;
     });
@@ -113,9 +145,15 @@ function triggerRefresh() {
   return refreshInFlight;
 }
 
+// Raw error text (upstream responses, paths, stack details) stays in the
+// server log; browsers get a generic message unless the error is marked safe.
+function clientMessage(err) {
+  return err && err.clientSafe ? err.message : 'Refresh failed - see the server log for details.';
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  const headers = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Vary': 'Accept-Encoding' };
+  const headers = { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff', 'Vary': 'Accept-Encoding' };
   // Small bodies (status polls, errors) aren't worth the CPU; larger ones (history ranges) compress ~10x.
   if (body.length > 1024 && /\bgzip\b/.test((res.req && res.req.headers['accept-encoding']) || '')) {
     zlib.gzip(body, (err, zipped) => {
@@ -154,12 +192,12 @@ async function handleHistory(rawUrl, res) {
 }
 
 function serveStatic(req, url, res, rawUrl) {
-  let filePath = path.join(ROOT, decodeURIComponent(url.split('?')[0]));
-  if (url === '/') filePath = path.join(ROOT, 'workload-dashboard.html');
-  if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
+  const rel = STATIC_ALLOWLIST.get(url.split('?')[0]);
+  if (!rel) { sendNotFound(res); return; }
+  const filePath = path.join(ROOT, rel);
 
   fs.stat(filePath, (statErr, stat) => {
-    if (statErr || !stat.isFile()) { sendNotFound(res, rawUrl, url, filePath); return; }
+    if (statErr || !stat.isFile()) { sendNotFound(res); return; }
     const ext = path.extname(filePath);
     // Weak-ish validator from mtime+size: changes whenever the collector
     // rewrites the file, so clients always see fresh data but an unchanged
@@ -171,6 +209,7 @@ function serveStatic(req, url, res, rawUrl) {
       // "never show a stale page after an edit" guarantee of no-store.
       'Cache-Control': 'no-cache',
       'ETag': etag,
+      'X-Content-Type-Options': 'nosniff',
       'Vary': 'Accept-Encoding'
     };
     if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return; }
@@ -179,7 +218,7 @@ function serveStatic(req, url, res, rawUrl) {
     const encoding = !COMPRESSIBLE.has(ext) ? null : /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : null;
     if (!encoding) {
       fs.readFile(filePath, (err, data) => {
-        if (err) { sendNotFound(res, rawUrl, url, filePath); return; }
+        if (err) { sendNotFound(res); return; }
         res.writeHead(200, headers);
         res.end(data);
       });
@@ -195,7 +234,7 @@ function serveStatic(req, url, res, rawUrl) {
     };
     if (cached && cached.etag === etag) { send(cached.body); return; }
     fs.readFile(filePath, (err, data) => {
-      if (err) { sendNotFound(res, rawUrl, url, filePath); return; }
+      if (err) { sendNotFound(res); return; }
       const done = (zErr, body) => {
         if (zErr) { res.writeHead(200, headers); res.end(data); return; }
         compressedCache.set(cacheKey, { etag, body });
@@ -210,23 +249,14 @@ function serveStatic(req, url, res, rawUrl) {
   });
 }
 
-function sendNotFound(res, rawUrl, url, filePath) {
+function sendNotFound(res) {
   res.writeHead(404, { 'Content-Type': 'text/plain' });
-  // TEMP DIAG - root-causing the cPanel subpath 404; safe to leave (no
-  // secrets), but trim back to plain "Not found" once this is resolved.
-  res.end(`Not found. [diag] rawUrl=${JSON.stringify(rawUrl)} BASE_PATH=${JSON.stringify(BASE_PATH)} strippedUrl=${JSON.stringify(url)} filePath=${JSON.stringify(filePath)}`);
+  res.end('Not found');
 }
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
-    res.end();
-    return;
-  }
+  // No CORS: the page is same-origin, so cross-origin preflights are refused.
+  if (req.method === 'OPTIONS') { res.writeHead(405); res.end(); return; }
 
   // If the app is mounted under a path prefix (BASE_PATH) and someone hits
   // that exact path with no trailing slash (e.g. /ePlan-Dashboard instead
@@ -260,6 +290,12 @@ const server = http.createServer((req, res) => {
   const url = stripBasePath(req.url);
 
   if (url === '/refresh' && req.method === 'POST') {
+    // A custom header can't be sent cross-origin without a CORS preflight
+    // (which we refuse), so this blocks other sites from triggering a refresh.
+    if (req.headers['x-requested-with'] !== 'dashboard') {
+      sendJson(res, 403, { ok: false, error: 'Missing X-Requested-With header.' });
+      return;
+    }
     triggerRefresh()
       .then(({ snapshot, tookSeconds }) => {
         sendJson(res, 200, {
@@ -270,7 +306,7 @@ const server = http.createServer((req, res) => {
         });
       })
       .catch((err) => {
-        sendJson(res, 500, { ok: false, error: err.message });
+        sendJson(res, err.clientSafe ? 429 : 500, { ok: false, error: clientMessage(err) });
       });
     return;
   }
@@ -296,7 +332,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.split('?')[0] === '/history' && req.method === 'GET') {
-    handleHistory(url, res).catch((err) => sendJson(res, 500, { ok: false, error: err.message }));
+    handleHistory(url, res).catch((err) => { console.error('[history]', err); sendJson(res, 500, { ok: false, error: 'History lookup failed.' }); });
     return;
   }
 
@@ -314,7 +350,7 @@ server.listen(PORT, () => {
   if (AUTH_ENABLED) {
     console.log('HTTP Basic Auth: ENABLED (DASHBOARD_USER/DASHBOARD_PASSWORD are set).');
   } else {
-    console.warn('WARNING: DASHBOARD_USER / DASHBOARD_PASSWORD are not set - this app is running WITHOUT a login. Fine on a trusted local/office network; set both before exposing it publicly.');
+    console.warn('WARNING: running WITHOUT a login (ALLOW_NO_AUTH=1). Local development only - never expose this publicly.');
   }
   if (AUTO_REFRESH_MINUTES > 0) {
     console.log(`Auto-refresh:  ENABLED, every ${AUTO_REFRESH_MINUTES} minute(s).`);

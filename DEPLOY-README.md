@@ -78,14 +78,13 @@ variables**:
 |---|---|---|
 | `PROJECTDOX_ADMIN_EMAIL` | the ProjectDox admin account email | Yes - Refresh Now won't work without it |
 | `PROJECTDOX_ADMIN_PASSWORD` | its password | Yes |
-| `DASHBOARD_USER` | a username you choose for this dashboard | **Strongly recommended** |
-| `DASHBOARD_PASSWORD` | a password you choose | **Strongly recommended** |
+| `DASHBOARD_USER` | a username you choose for this dashboard | **Required** - the app refuses to start without both |
+| `DASHBOARD_PASSWORD` | a password you choose | **Required** - the app refuses to start without both |
 
 **About `DASHBOARD_USER`/`DASHBOARD_PASSWORD`:** this dashboard shows
 internal review data - project names, addresses, and reviewer names. Setting
 both of these turns on an HTTP login prompt for the whole app (added
-specifically for this deployment). Leaving them blank leaves it open to
-anyone who finds the URL. Pick something not reused elsewhere.
+specifically for this deployment). If either is missing the app exits at startup (a 503 in cPanel; check the stderr log) rather than running open. `ALLOW_NO_AUTH=1` overrides this for local development only - never set it on the public deployment. Pick something not reused elsewhere.
 
 ## 4. Install and start
 
@@ -115,7 +114,7 @@ periodically, cPanel's **Cron Jobs** page can do it with a `curl` call, e.g.
 every 2 hours:
 
 ```bash
-curl -s -u 'DASHBOARD_USER:DASHBOARD_PASSWORD' -X POST https://your-app-url/refresh
+curl -s -u 'DASHBOARD_USER:DASHBOARD_PASSWORD' -H 'X-Requested-With: dashboard' -X POST https://your-app-url/refresh
 ```
 
 Replace the URL and credentials with your actual values. Only set this up if
