@@ -233,7 +233,7 @@ async function login() {
   });
   if (!res.ok) throw new Error(`User/Login HTTP ${res.status}`);
   const data = await res.json();
-  if (!data.SessionID) throw new Error('Login succeeded but no SessionID in response: ' + JSON.stringify(data));
+  if (!data.SessionID) throw new Error('Login succeeded but the response had no SessionID.');
   return data.SessionID;
 }
 

@@ -114,7 +114,7 @@ function triggerRefresh() {
 
   const secondsSinceLast = (Date.now() - lastRefreshFinishedAt) / 1000;
   if (lastRefreshFinishedAt && secondsSinceLast < MIN_SECONDS_BETWEEN_REFRESHES) {
-    return Promise.reject(new Error(`A refresh finished ${Math.round(secondsSinceLast)}s ago - please wait a bit before triggering another (min ${MIN_SECONDS_BETWEEN_REFRESHES}s apart).`));
+    return Promise.reject(Object.assign(new Error(`A refresh finished ${Math.round(secondsSinceLast)}s ago - please wait a bit before triggering another (min ${MIN_SECONDS_BETWEEN_REFRESHES}s apart).`), { clientSafe: true }));
   }
 
   refreshStartedAt = Date.now();
@@ -136,12 +136,19 @@ function triggerRefresh() {
     })
     .catch((err) => {
       refreshInFlight = null;
-      refreshLog.push({ t: Date.now(), msg: `ERROR: ${err.message}` });
+      console.error('[collector] refresh failed:', err);
+      refreshLog.push({ t: Date.now(), msg: `ERROR: ${clientMessage(err)}` });
       refreshLogTotal++;
       throw err;
     });
 
   return refreshInFlight;
+}
+
+// Raw error text (upstream responses, paths, stack details) stays in the
+// server log; browsers get a generic message unless the error is marked safe.
+function clientMessage(err) {
+  return err && err.clientSafe ? err.message : 'Refresh failed - see the server log for details.';
 }
 
 function sendJson(res, status, obj) {
@@ -299,7 +306,7 @@ const server = http.createServer((req, res) => {
         });
       })
       .catch((err) => {
-        sendJson(res, 500, { ok: false, error: err.message });
+        sendJson(res, err.clientSafe ? 429 : 500, { ok: false, error: clientMessage(err) });
       });
     return;
   }
@@ -325,7 +332,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.split('?')[0] === '/history' && req.method === 'GET') {
-    handleHistory(url, res).catch((err) => sendJson(res, 500, { ok: false, error: err.message }));
+    handleHistory(url, res).catch((err) => { console.error('[history]', err); sendJson(res, 500, { ok: false, error: 'History lookup failed.' }); });
     return;
   }
 
