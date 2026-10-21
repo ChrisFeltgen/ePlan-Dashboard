@@ -115,7 +115,7 @@ periodically, cPanel's **Cron Jobs** page can do it with a `curl` call, e.g.
 every 2 hours:
 
 ```bash
-curl -s -u 'DASHBOARD_USER:DASHBOARD_PASSWORD' -X POST https://your-app-url/refresh
+curl -s -u 'DASHBOARD_USER:DASHBOARD_PASSWORD' -H 'X-Requested-With: dashboard' -X POST https://your-app-url/refresh
 ```
 
 Replace the URL and credentials with your actual values. Only set this up if

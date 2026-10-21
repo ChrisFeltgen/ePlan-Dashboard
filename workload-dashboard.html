@@ -1396,7 +1396,7 @@
     pollTimer = setInterval(function () { pollStatus(myToken); }, 1200);
     pollStatus(myToken);
 
-    fetch('refresh', { method: 'POST' })
+    fetch('refresh', { method: 'POST', headers: { 'X-Requested-With': 'dashboard' } })
       .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
       .then(function (result) {
         clearInterval(pollTimer);
