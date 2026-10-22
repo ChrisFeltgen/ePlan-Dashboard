@@ -1,0 +1,17 @@
+# Generated caches, snapshots and history - never commit
+data/
+*.csv
+*-results.json
+*-raw.txt
+workload-probe-*.json
+node_modules/
+.claude/worktrees/
+# Server copy and runtime output (not source)
+web/
+stderr.log
+tmp/
+public/
+node_modules/
+
+# Local preview with embedded snapshot data
+preview.html
