@@ -38,14 +38,14 @@ const CACHE_SCHEMA_VERSION = 6;
 //
 // Workflow instance: project, template and revision never change; the cached
 // state (Active or not) is re-checked at this interval.
-const MAX_INSTANCE_CACHE_AGE_MIN = 1440;
+const MAX_INSTANCE_CACHE_AGE_MIN = 8 * 60;
 // Reviewer names.
-const MAX_USER_CACHE_AGE_MIN = 7 * 1440;
+const MAX_USER_CACHE_AGE_MIN = 3 * 1440;
 // Project number, description and location.
-const MAX_PROJECT_CACHE_AGE_MIN = 7 * 1440;
+const MAX_PROJECT_CACHE_AGE_MIN = 3 * 1440;
 // A project's list of revision instances. Also refetched as soon as a
 // revision appears that isn't in the cached list.
-const MAX_REVISION_CACHE_AGE_MIN = 30 * 1440;
+const MAX_REVISION_CACHE_AGE_MIN = 7 * 1440;
 // The Report* tables are an append-only historical mirror of several hundred
 // thousand rows. A long TTL keeps most refreshes from re-downloading them; the
 // cost is that history for an instance closed within the TTL appears late.
