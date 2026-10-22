@@ -1,5 +1,6 @@
-// Builds the review-workload snapshot from the ProjectDox API. Can be called
-// in-process from server.js's /refresh handler, or run standalone:
+// Builds the review-workload snapshot from the ProjectDox API and maintains
+// the per-day completed-task history. Called in-process by server.js, or run
+// standalone:
 //   node collector.js
 //
 // Requires PROJECTDOX_ADMIN_EMAIL / PROJECTDOX_ADMIN_PASSWORD in the
@@ -11,37 +12,12 @@ const { fork } = require('child_process');
 
 const ROOT = __dirname;
 const BASE_URL = 'https://pompanobeach-fl-us-projectdoxwebapi.avolvecloud.com';
+const APP_VERSION = readJsonSafe(path.join(ROOT, 'package.json'), {}).version || 'unknown';
 
-// Logged as the first line of every refresh, so "is the file I just uploaded
-// the one actually running?" is answered by reading the log instead of
-// guessing from file sizes or restart timing. Bump it whenever this file changes.
-const COLLECTOR_BUILD = '2026-10-05.3 (Today counts backed by saved history, streamed report-tables cache, API retry)';
-
-// Every cache/snapshot/history file this app maintains lives under
-// ROOT/data, not loose in the app root next to collector.js/server.js/
-// workload-dashboard.html - keeps "the code" and "the data this code has
-// accumulated" visually and operationally separate (so the app root isn't
-// 20+ generated files deep, and so it's obvious at a glance what's safe to delete vs what's the app itself).
+// All generated files (caches, snapshot, history) live under data/.
 const DATA_DIR = path.join(ROOT, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
-// One-time migration for an existing deployment upgrading from before this
-// /data/ split: if a cache/history file/folder is still sitting in the old
-// spot (app root) and hasn't already been moved, move it rather than start
-// over - losing the report-tables cache or months of backfilled history to
-// a mere file-layout change would be a real regression, not a fresh start.
-// Best-effort: any failure here just means that one file rebuilds from
-// scratch in the new location instead of the run crashing.
-function migrateLegacyDataFile(oldPath, newPath) {
-  try {
-    if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) fs.renameSync(oldPath, newPath);
-  } catch (e) { /* rebuilds fresh in the new location instead */ }
-}
 
-// Fallback only, for the rare case a live Project/GetProject lookup fails -
-// not the primary source any more (see PROJECT_CACHE_JSON below). This was a
-// one-time Sept 15 snapshot with no automatic refresh, which is exactly what
-// made project name/status go stale.
-const PROJECT_LIST_CSV = path.join(DATA_DIR, 'projectdox-raw-pull-20260915-230752.csv');
 const INSTANCE_CACHE_JSON = path.join(DATA_DIR, 'workload-instance-cache.json');
 const USER_CACHE_JSON = path.join(DATA_DIR, 'workload-user-cache.json');
 const PROJECT_CACHE_JSON = path.join(DATA_DIR, 'workload-project-cache.json');
@@ -49,59 +25,32 @@ const REVISION_INSTANCES_CACHE_JSON = path.join(DATA_DIR, 'workload-revision-ins
 const REPORT_TABLES_CACHE_JSON = path.join(DATA_DIR, 'workload-report-tables-cache.json');
 const COMPLETED_TODAY_CACHE_JSON = path.join(DATA_DIR, 'workload-completed-today-cache.json');
 const SNAPSHOT_JSON = path.join(DATA_DIR, 'workload-snapshot.json');
-const DETAIL_CSV = path.join(DATA_DIR, 'workload-detail-latest.csv');
-// Per-permit routing history (department/cycle/decision over time) for
-// permit-status.js - a separate file rather than folding into SNAPSHOT_JSON
-// because it needs to cover every project that has EVER had a review, not
-// just ones with a currently-open task.
-const ROUTING_HISTORY_JSON = path.join(DATA_DIR, 'permit-routing-history.json');
-[PROJECT_LIST_CSV, INSTANCE_CACHE_JSON, USER_CACHE_JSON, PROJECT_CACHE_JSON, REVISION_INSTANCES_CACHE_JSON,
-  REPORT_TABLES_CACHE_JSON, COMPLETED_TODAY_CACHE_JSON, SNAPSHOT_JSON, DETAIL_CSV]
-  .forEach((newPath) => migrateLegacyDataFile(path.join(ROOT, path.basename(newPath)), newPath));
 
-// Bump this whenever a field gets added to what an instance/project/revision/
-// report-tables cache entry stores (like Revision was, then the wider
-// ReportWFlowTasks projection now). A stale-but-recent entry written by an
-// older code version won't have the new field, and the age-based freshness
-// check alone has no way to notice that - it'll happily keep reusing an
-// entry that's silently missing data forever, until its TTL finally expires
-// on its own. Checking SchemaVersion alongside CachedAt makes that kind of
-// entry look stale immediately instead, without needing to manually clear a
-// cache file every time a field is added (which is exactly what happened
-// with Description, Location, Revision, the report-tables cache's
-// GroupID/TaskName/dates/AssignmentTypeID fields, then WFlowActivityID,
-// ReportWFlowReviews/ReportWFlowReviewResults for routing history, and now
-// ReportWFlowReviewChecklistInstances for real reviewer comments).
+// Stored on every cache entry. Bump it whenever a field is added to what an
+// instance/project/revision/report-tables cache entry holds: entries with a
+// different version are treated as stale regardless of age, so they are
+// refetched with the new field instead of being reused until their TTL expires.
 const CACHE_SCHEMA_VERSION = 6;
 
+// Cache lifetimes, in minutes.
 const MAX_INSTANCE_CACHE_AGE_MIN = 120;
 const MAX_USER_CACHE_AGE_MIN = 1440;
-// Short TTL - project Status changes throughout the day, unlike instance
-// state or reviewer names, so this needs to go stale much faster than those.
+// Project Status changes during the day, so project entries expire quickly.
 const MAX_PROJECT_CACHE_AGE_MIN = 15;
-// Long TTL - which instances exist for a project's revision history doesn't
-// change once a revision is closed out, so this is safe to cache for a while.
+// The set of instances belonging to a project's earlier revisions rarely changes.
 const MAX_REVISION_CACHE_AGE_MIN = 1440;
-// ReportWFlowTasks/ReportWFlowReviewCycles are ~500k rows combined and add
-// 15-25s to every refresh if pulled live every time. They're an append-only
-// historical mirror (a completed review's row there never changes), so a
-// long TTL is safe - the only cost of staleness is not seeing a review
-// group's history for an instance that closed within the last few hours,
-// and clicking Refresh Now again after that TTL expires picks it up.
+// The Report* tables are an append-only historical mirror of several hundred
+// thousand rows. A long TTL keeps most refreshes from re-downloading them; the
+// cost is that history for an instance closed within the TTL appears late.
 const MAX_REPORT_TABLES_CACHE_AGE_MIN = 360;
 const CONCURRENCY = 15; // parallel REST lookups for instance/user/project resolution
-// Routing history needs WFlowInstanceID -> ProjectID for every instance that
-// has EVER had a review, not just ones with a currently-open task (the only
-// ones instanceCache resolved before this) - on a system with ~140k
-// historical review rows that can be many thousands of never-before-seen
-// instance IDs the first time this runs. Capped per run (same idea as
-// HISTORY_MAX_NEW_DAYS_PER_RUN) so that one-time backfill spreads across
-// several refreshes instead of stalling a single run for minutes; already-
-// resolved instances are cached forever after, same as everywhere else. 1000
-// was the original guess; a live run resolving 1000 in ~5s of a 105s run
-// showed that was overly conservative (~36 runs to clear a 36k backlog),
-// so it's raised once actual throughput was confirmed.
-const MAX_REVIEW_INSTANCE_BACKFILL_PER_RUN = 6000;
+
+// Per-request time limits, so a stalled connection fails the request instead
+// of leaving the refresh running forever.
+const REQUEST_TIMEOUT_MS = 60 * 1000; // single-record REST calls and login
+const QUERY_TIMEOUT_MS = 5 * 60 * 1000; // whole-table QueryDatabase calls
+const STREAM_TIMEOUT_MS = 20 * 60 * 1000; // streamed Report* table downloads
+const REPORT_CHILD_TIMEOUT_MS = 45 * 60 * 1000; // the whole report-tables child process
 
 // --- small utilities ---------------------------------------------------
 
@@ -115,53 +64,29 @@ function readJsonSafe(filePath, fallback) {
   }
 }
 
-function writeJson(filePath, obj, { compact = false } = {}) {
-  // compact: for files the browser downloads and parses (indentation is ~30% of the snapshot's size)
-  fs.writeFileSync(filePath, compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2), 'utf8'); // utf8 with no BOM
-}
-
-function parseCsvLine(line) {
-  const out = [];
-  let cur = '', inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQuotes) {
-      if (c === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else inQuotes = false; }
-      else cur += c;
-    } else {
-      if (c === '"') inQuotes = true;
-      else if (c === ',') { out.push(cur); cur = ''; }
-      else cur += c;
-    }
+// Written to a temp file and renamed into place, so a reader (the web server,
+// or the next run) never sees a partially written file.
+function writeFileAtomic(filePath, text) {
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text, 'utf8');
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (e) {
+    // Windows can refuse the rename while another process (e.g. antivirus)
+    // holds the target open; fall back to a direct write.
+    fs.writeFileSync(filePath, text, 'utf8');
+    try { fs.unlinkSync(tmp); } catch (e2) { /* already gone */ }
   }
-  out.push(cur);
-  return out;
 }
 
-function readCsv(filePath) {
-  const raw = stripBom(fs.readFileSync(filePath, 'utf8'));
-  const lines = raw.split(/\r?\n/).filter((l) => l.length > 0);
-  if (lines.length === 0) return [];
-  const header = parseCsvLine(lines[0]);
-  return lines.slice(1).map((line) => {
-    const cols = parseCsvLine(line);
-    const row = {};
-    header.forEach((h, i) => { row[h] = cols[i]; });
-    return row;
-  });
+// compact: no indentation, for files the browser downloads and parses.
+function writeJson(filePath, obj, { compact = false } = {}) {
+  writeFileAtomic(filePath, compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2));
 }
 
-function writeCsv(filePath, rows) {
-  if (rows.length === 0) { fs.writeFileSync(filePath, '', 'utf8'); return; }
-  const cols = Object.keys(rows[0]);
-  const esc = (v) => {
-    if (v === null || v === undefined) return '""';
-    const s = String(v);
-    return '"' + s.replace(/"/g, '""') + '"';
-  };
-  const lines = [cols.map(esc).join(',')];
-  for (const r of rows) lines.push(cols.map((c) => esc(r[c])).join(','));
-  fs.writeFileSync(filePath, lines.join('\r\n'), 'utf8');
+function isFresh(entry, maxAgeMin, now) {
+  if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return false;
+  return (now - new Date(entry.CachedAt).getTime()) / 60000 < maxAgeMin;
 }
 
 async function mapConcurrent(items, limit, fn) {
@@ -182,27 +107,29 @@ async function mapConcurrent(items, limit, fn) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Where retry notices go: the collector's own log once a run is underway (so
-// they show up in the dashboard's "Show details" panel), plain console
-// otherwise. Set per run by runCollector() and by the report-tables child.
+// Where retry notices go: the collector's log once a run is underway (so they
+// appear in the dashboard's "Show details" panel), plain console otherwise.
+// Set per run by runCollector() and by the report-tables child.
 let retryLog = (msg) => console.warn(msg);
 
-// A single transient gateway/overload response from the ProjectDox API (or a
-// dropped connection) shouldn't fail an entire refresh - it did exactly that
-// once: QueryDatabase(WFlowActivities) came back HTTP 503 at 11:03 PM and the
-// whole run aborted. QueryDatabase here is always a read-only 'select', so
-// repeating the request is safe. Only the request itself is retried: once a
-// response body has started streaming into a caller's onRow callback, a
-// failure part-way through is NOT retried (that would hand the caller rows it
-// already received a second time).
+// fetch() with a time limit covering both the response and reading its body.
+function apiFetch(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return fetch(url, Object.assign({}, options, { signal: AbortSignal.timeout(timeoutMs) }));
+}
+
+// Retries a QueryDatabase request after a transient gateway/overload status
+// or a network-level failure. These requests are read-only selects, so
+// repeating them is safe. Only the request is retried: once a response body
+// has started streaming into a caller's onRow callback, a failure part-way
+// through is not retried, since the caller has already received those rows.
 const RETRY_DELAYS_MS = [3000, 8000, 20000];
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
-async function fetchWithRetry(url, options, label) {
+async function fetchWithRetry(url, options, label, timeoutMs) {
   for (let attempt = 0; ; attempt++) {
     let res = null;
     let failure;
     try {
-      res = await fetch(url, options);
+      res = await apiFetch(url, options, timeoutMs);
       if (res.ok || !RETRYABLE_STATUSES.has(res.status)) return res;
       failure = `HTTP ${res.status}`;
       try { await res.body.cancel(); } catch (e) { /* body already closed */ }
@@ -222,9 +149,9 @@ async function login() {
   const email = process.env.PROJECTDOX_ADMIN_EMAIL;
   const password = process.env.PROJECTDOX_ADMIN_PASSWORD;
   if (!email || !password) {
-    throw new Error('PROJECTDOX_ADMIN_EMAIL / PROJECTDOX_ADMIN_PASSWORD are not set in the environment.');
+    throw Object.assign(new Error('PROJECTDOX_ADMIN_EMAIL / PROJECTDOX_ADMIN_PASSWORD are not set on the server.'), { clientSafe: true });
   }
-  const res = await fetch(`${BASE_URL}/User/Login`, {
+  const res = await apiFetch(`${BASE_URL}/User/Login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ Email: email, Password: password })
@@ -235,42 +162,36 @@ async function login() {
   return data.SessionID;
 }
 
-async function queryTable(sessionId, tableName) {
-  const res = await fetchWithRetry(`${BASE_URL}/Query/QueryDatabase`, {
+function queryDatabaseRequest(sessionId, tableName) {
+  return {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', SessionID: sessionId },
     body: JSON.stringify({ IsProjectDox: true, ConnectionString: null, Operation: 'select', TableName: tableName })
-  }, `Query/QueryDatabase(${tableName})`);
+  };
+}
+
+// Whole table as an array. The response is shaped {"<TableName>": [ ... ]},
+// with the key's casing not guaranteed to match the request.
+async function queryTable(sessionId, tableName) {
+  const res = await fetchWithRetry(`${BASE_URL}/Query/QueryDatabase`, queryDatabaseRequest(sessionId, tableName),
+    `Query/QueryDatabase(${tableName})`, QUERY_TIMEOUT_MS);
   if (!res.ok) throw new Error(`Query/QueryDatabase(${tableName}) HTTP ${res.status}`);
   const data = await res.json();
   const key = Object.keys(data).find((k) => k.toLowerCase() === tableName.toLowerCase());
   return key ? data[key] : [];
 }
 
-// Same endpoint as queryTable(), but never materializes the full response as
-// text or as a fully-parsed array of full-width row objects - it scans the
-// response body as it streams in and calls onRow(row) once per complete
-// object, immediately after that object closes. The caller is expected to
-// project/slim each row and discard the rest right away, so at any moment
-// at most ONE raw row (plus whatever the caller chose to retain) exists in
-// memory - not all ~494k of them at once. This is what makes it possible to
-// fetch a huge table like ReportWFlowTasks (27 columns/row, some with long
-// HTML text) on a memory-constrained host that can't survive holding the
-// full raw shape of the whole table at once (see fetchAndCacheReportTables).
+// Same request as queryTable(), but parses the response body as it streams
+// in and calls onRow(row) once per row object, so the full response is never
+// held in memory. Used for the very large Report* tables, whose callers slim
+// each row and discard the rest immediately.
 //
-// Relies on the response always being shaped {"<TableName>": [ {...}, ... ]}
-// - true for every table this app queries - by treating the first top-level
-// `[` (outside any string) as the start of the array we want, and each
-// balanced `{...}` inside it (again tracking string/escape state so braces
-// or brackets embedded in a string value are never mistaken for structure)
-// as one row. JSON.parse() is still used per-object - this only avoids ever
-// holding the FULL array/response, not per-object parsing itself.
+// Scanner: the first top-level `[` (outside any string) starts the row array;
+// each balanced `{...}` inside it is one row, passed to JSON.parse(). String
+// and escape state are tracked so braces inside string values are ignored.
 async function streamQueryTableRows(sessionId, tableName, onRow) {
-  const res = await fetchWithRetry(`${BASE_URL}/Query/QueryDatabase`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', SessionID: sessionId },
-    body: JSON.stringify({ IsProjectDox: true, ConnectionString: null, Operation: 'select', TableName: tableName })
-  }, `Query/QueryDatabase(${tableName})`);
+  const res = await fetchWithRetry(`${BASE_URL}/Query/QueryDatabase`, queryDatabaseRequest(sessionId, tableName),
+    `Query/QueryDatabase(${tableName})`, STREAM_TIMEOUT_MS);
   if (!res.ok) throw new Error(`Query/QueryDatabase(${tableName}) HTTP ${res.status}`);
   if (!res.body) throw new Error(`Query/QueryDatabase(${tableName}): response has no readable body to stream`);
 
@@ -322,93 +243,89 @@ async function streamQueryTableRows(sessionId, tableName, onRow) {
       const { done, value } = await reader.read();
       if (done) break;
       feed(decoder.decode(value, { stream: true }));
-      if (state === 'DONE') break; // got the whole array we care about; no need to read further
+      if (state === 'DONE') break; // the row array is complete; ignore the rest of the body
     }
   } finally {
-    try { await reader.cancel(); } catch (e) { /* stream already finished/closed - fine */ }
+    try { await reader.cancel(); } catch (e) { /* stream already closed */ }
   }
 
   return rowCount;
 }
 
-async function getWorkflowInstance(sessionId, wflowInstanceID) {
-  const res = await fetch(`${BASE_URL}/WorkflowInstance/GetWorkflowInstance?wflowInstanceID=${wflowInstanceID}`, {
-    headers: { SessionID: sessionId }
-  });
-  if (!res.ok) throw new Error(`GetWorkflowInstance(${wflowInstanceID}) HTTP ${res.status}`);
+async function getJson(sessionId, url, label) {
+  const res = await apiFetch(url, { headers: { SessionID: sessionId } });
+  if (!res.ok) throw new Error(`${label} HTTP ${res.status}`);
   return res.json();
 }
 
-async function getUser(sessionId, userID) {
-  const res = await fetch(`${BASE_URL}/User/GetUser?userID=${userID}`, {
-    headers: { SessionID: sessionId }
-  });
-  if (!res.ok) throw new Error(`GetUser(${userID}) HTTP ${res.status}`);
-  return res.json();
+function getWorkflowInstance(sessionId, wflowInstanceID) {
+  return getJson(sessionId, `${BASE_URL}/WorkflowInstance/GetWorkflowInstance?wflowInstanceID=${encodeURIComponent(wflowInstanceID)}`,
+    `GetWorkflowInstance(${wflowInstanceID})`);
 }
 
-async function getProject(sessionId, projectID) {
-  const res = await fetch(`${BASE_URL}/Project/GetProject?projectID=${projectID}`, {
-    headers: { SessionID: sessionId }
-  });
-  if (!res.ok) throw new Error(`GetProject(${projectID}) HTTP ${res.status}`);
-  return res.json();
+function getUser(sessionId, userID) {
+  return getJson(sessionId, `${BASE_URL}/User/GetUser?userID=${encodeURIComponent(userID)}`, `GetUser(${userID})`);
+}
+
+function getProject(sessionId, projectID) {
+  return getJson(sessionId, `${BASE_URL}/Project/GetProject?projectID=${encodeURIComponent(projectID)}`, `GetProject(${projectID})`);
 }
 
 async function getWorkflowInstancesByProjectName(sessionId, projectName) {
-  const res = await fetch(`${BASE_URL}/WorkflowInstance/GetWorkflowInstancesByProjectName?projectName=${encodeURIComponent(projectName)}`, {
-    headers: { SessionID: sessionId }
-  });
-  if (!res.ok) throw new Error(`GetWorkflowInstancesByProjectName(${projectName}) HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await getJson(sessionId,
+    `${BASE_URL}/WorkflowInstance/GetWorkflowInstancesByProjectName?projectName=${encodeURIComponent(projectName)}`,
+    `GetWorkflowInstancesByProjectName(${projectName})`);
   return Array.isArray(data) ? data : (data ? [data] : []);
 }
 
-// ProjectDox names each revision's own workflow instance like
-// "BP22-00009910 R001: OFF SITE SHOPS" - R000 is the original submission,
-// R001+ are formal revisions. Each revision is a SEPARATE instance with its
-// own independent review-cycle counter (confirmed live: an R001 instance sat
-// at Cycle 2 on its own, unrelated to R000's cycle count), so "who reviewed
-// this before" for a Cycle-1-of-a-revision task has to look at the PREVIOUS
-// revision's instance, not an earlier cycle of this one.
+// Each revision of a project is its own workflow instance, named like
+// "BP00-00000000 R001: DESCRIPTION" (R000 = original submission, R001+ =
+// revisions), with its own independent review-cycle counter. Returns the
+// revision number, or null if the name doesn't carry one.
 function parseRevision(instanceName) {
   if (!instanceName) return null;
   const m = instanceName.match(/\bR0*(\d+)\s*:/);
   return m ? parseInt(m[1], 10) : null;
 }
 
-// --- report tables: fetched in an isolated child process ------------------
+function instanceCacheEntry(inst) {
+  return {
+    WFlowInstanceID: inst.WFlowInstanceID,
+    WFlowID: inst.WFlowID,
+    EntityID: inst.EntityID, // the ProjectID
+    WFlowInstanceStateID: inst.WFlowInstanceStateID, // 1 = Active
+    WFlowInstanceStateName: inst.WFlowInstanceStateName,
+    InstanceName: inst.InstanceName,
+    Revision: parseRevision(inst.InstanceName),
+    DateCompleted: inst.DateCompleted,
+    SchemaVersion: CACHE_SCHEMA_VERSION,
+    CachedAt: new Date().toISOString()
+  };
+}
 
-// ReportWFlowTasks/ReportWFlowReviewCycles together are ~500k+ rows in their
-// full raw shape (27 columns on ReportWFlowTasks, including a long HTML
-// task-description field on some rows) - large enough that fetching them in
-// the same long-running process as the web server risks tripping a host's
-// memory limit and taking the whole app down with it. This is not
-// theoretical: on a memory-constrained shared host, a physical-memory
-// cap killed the server process mid-refresh.
+function userDisplayName(u) {
+  return u.FullName || `${u.FirstName || ''} ${u.LastName || ''}`.trim() || u.Email || null;
+}
+
+// --- report tables: fetched in an isolated child process ------------------
 //
-// Doing this fetch in a short-lived child process instead means its peak
-// memory - dominated by the raw, un-slimmed rows - never has to coexist
-// with the rest of the collector's own memory usage in the process that
-// must stay alive for the dashboard to keep working, and gets released back
-// to the OS the moment the child exits, whether it finishes normally or
-// gets killed itself. The parent only ever holds the already-slimmed
-// ~6-field version it reads back from the cache file the child writes.
+// ReportWFlowTasks and ReportWFlowReviewCycles together hold several hundred
+// thousand rows, and the raw ReportWFlowTasks rows are wide (27 columns,
+// some with long HTML text). They are downloaded by a short-lived child
+// process (`node collector.js --fetch-report-tables`) that streams them,
+// keeps only the needed columns, and writes them to REPORT_TABLES_CACHE_JSON.
+// The download's peak memory therefore never lands in the long-running server
+// process, and is returned to the OS when the child exits. The parent only
+// reads back the slimmed rows.
+
 function sendProgress(msg) {
   if (process.send) process.send({ type: 'log', text: msg });
   else console.log(msg);
 }
 
-// Streams ONE Report* table straight into the already-open cache file as it
-// arrives - each row is slimmed, serialized, and written out in small batches,
-// so the child never holds a table's rows (let alone all five tables') in
-// memory at once. This replaced "collect five big arrays, JSON.stringify the
-// whole thing into one string, writeFileSync it": that peaked at roughly
-// (every row object) + (one multi-hundred-MB string) + (a Buffer copy of that
-// string) all at the same moment, and on the memory-limited host the child
-// was SIGKILLed right at that final write once the cache grew past what the
-// account's memory cap allowed - the first full refresh with the five-table
-// cache (routing history + comments added) died exactly there.
+// Streams one Report* table into the already-open cache file as it arrives:
+// each row is slimmed, serialized and written in batches, so no table is ever
+// held in memory in full.
 async function streamTableIntoCache(sessionId, fd, cacheKey, tableName, slim, isFirstKey) {
   fs.writeFileSync(fd, (isFirstKey ? '' : ',') + JSON.stringify(cacheKey) + ':[');
   let pending = [];
@@ -429,28 +346,15 @@ async function streamTableIntoCache(sessionId, fd, cacheKey, tableName, slim, is
 }
 
 async function fetchAndCacheReportTables() {
-  retryLog = sendProgress; // this runs in its own child process: retry notices ride the same IPC channel as its progress lines
+  retryLog = sendProgress; // retry notices travel over the same IPC channel as progress lines
   const sessionId = await login();
 
-  // Slim each row down to only the fields actually needed downstream - the
-  // full raw 27-column row (some with long HTML text, e.g. Description) is
-  // never kept around, which is what lets this fetch survive a tight memory
-  // limit that killed it even when it was already isolated in its own child
-  // process but still parsing the response the ordinary (whole-array-at-once)
-  // way. The extra fields beyond the original 6 (GroupID, TaskName,
-  // DateCreated/Accepted/Due, WFlowTaskAssignmentTypeID) are all small
-  // scalars/short strings, not the long text that caused the original
-  // memory problem - added so a "completed today" task can be fully
-  // rendered even when it's ONLY reachable through this table (see the
-  // reportOnly merge below: the live WFlowTasks table drops a row entirely,
-  // not just marks it inactive, the moment its instance closes - a workflow
-  // that terminates the same day its last review completes would otherwise
-  // vanish from "completed today" with no trace).
+  // Only the columns used downstream are kept. ReportWFlowTasks keeps enough
+  // to render a completed task on its own, because once a workflow instance
+  // closes its tasks exist only in this table, not in live WFlowTasks.
   //
-  // Written to a temp file and renamed into place only once complete (same
-  // idea as writeHistoryDay): a kill part-way through leaves the PREVIOUS
-  // cache untouched and still readable, instead of a half-written file that
-  // the next run would find unparseable and treat as "no cache at all".
+  // Written to a temp file and renamed into place once complete, so a failed
+  // or killed run leaves the previous cache intact.
   const tmpPath = REPORT_TABLES_CACHE_JSON + '.tmp';
   const fd = fs.openSync(tmpPath, 'w');
   try {
@@ -462,51 +366,15 @@ async function fetchAndCacheReportTables() {
       GroupID: t.GroupID, TaskName: t.TaskName, DateCreated: t.DateCreated, DateAccepted: t.DateAccepted,
       DateDue: t.DateDue, WFlowTaskAssignmentTypeID: t.WFlowTaskAssignmentTypeID, WFlowActivityID: t.WFlowActivityID
     }), true);
-    sendProgress(`ReportWFlowTasks: ${taskCount} rows (streamed + slimmed on the fly)`);
+    sendProgress(`ReportWFlowTasks: ${taskCount} rows (streamed)`);
 
     const cycleCount = await streamTableIntoCache(sessionId, fd, 'reportReviewCycles', 'ReportWFlowReviewCycles', (c) => ({
-      WFlowReviewCycleID: c.WFlowReviewCycleID, WFlowInstanceID: c.WFlowInstanceID, ReviewCycle: c.ReviewCycle,
-      WFlowActivityGroupingInstanceID: c.WFlowActivityGroupingInstanceID // routing history's join key from a review to its cycle number
+      WFlowReviewCycleID: c.WFlowReviewCycleID, WFlowInstanceID: c.WFlowInstanceID, ReviewCycle: c.ReviewCycle
     }));
-    sendProgress(`ReportWFlowReviewCycles: ${cycleCount} rows (streamed + slimmed on the fly)`);
+    sendProgress(`ReportWFlowReviewCycles: ${cycleCount} rows (streamed)`);
 
-    // Routing history for permit-status.js (joined further down in
-    // runCollector): which department reviewed a project, on which cycle, and
-    // what they decided. WFlowReviews.ApplicantComments/ReviewerComments are
-    // NEVER read here - confirmed live (2026-09-28) they're always empty on
-    // this table specifically. The REAL comment text lives somewhere else
-    // entirely - see ReportWFlowReviewChecklistInstances below (found
-    // 2026-09-29) - don't be confused by the similarly-named empty columns here.
-    const reviewCount = await streamTableIntoCache(sessionId, fd, 'reportReviews', 'ReportWFlowReviews', (r) => ({
-      WFlowReviewID: r.WFlowReviewID, WFlowInstanceID: r.WFlowInstanceID,
-      WFlowActivityGroupingInstanceID: r.WFlowActivityGroupingInstanceID, GroupID: r.GroupID,
-      IsComplete: r.IsComplete, DateCompleted: r.DateCompleted, DateCreated: r.DateCreated
-    }));
-    sendProgress(`ReportWFlowReviews: ${reviewCount} rows (streamed + slimmed on the fly)`);
-
-    const resultCount = await streamTableIntoCache(sessionId, fd, 'reportReviewResults', 'ReportWFlowReviewResults', (r) => ({
-      WFlowReviewResultID: r.WFlowReviewResultID, WFlowReviewID: r.WFlowReviewID,
-      WFlowReviewStatusTypeID: r.WFlowReviewStatusTypeID, DateUpdated: r.DateUpdated, DateCreated: r.DateCreated
-    }));
-    sendProgress(`ReportWFlowReviewResults: ${resultCount} rows (streamed + slimmed on the fly)`);
-
-    // The REAL reviewer comment text (found 2026-09-29, see the memory notes on
-    // this repo for the full story of how many wrong turns it took to find).
-    // CreatedByID/CoordinatorCommentText are deliberately never read - the
-    // former is a bare reviewer ID with no reason to resolve/expose it
-    // publicly, the latter reads as a staff-only internal note (distinct from
-    // CommentText, which by its own content is clearly written to reach the
-    // applicant - e.g. "Please clearly show with structural details...").
-    const checklistCount = await streamTableIntoCache(sessionId, fd, 'reportChecklistInstances', 'ReportWFlowReviewChecklistInstances', (c) => ({
-      WFlowReviewChecklistInstanceID: c.WFlowReviewChecklistInstanceID, // dedupe key against the live table
-      WFlowInstanceID: c.WFlowInstanceID, WFlowReviewCycleID: c.WFlowReviewCycleID, GroupID: c.GroupID,
-      CommentText: c.CommentText, ResponseText: c.ResponseText, ReferenceNumber: c.ReferenceNumber,
-      DateCreated: c.DateCreated
-    }));
-    sendProgress(`ReportWFlowReviewChecklistInstances: ${checklistCount} rows (streamed + slimmed on the fly)`);
-
-    // SchemaVersion/CachedAt go LAST on purpose: peekReportTablesCacheMeta()
-    // reads just the tail of this file to check freshness without parsing it.
+    // SchemaVersion/CachedAt go last: peekReportTablesCacheMeta() reads only
+    // the tail of this file to check freshness without parsing it.
     fs.writeFileSync(fd, `,"SchemaVersion":${CACHE_SCHEMA_VERSION},"CachedAt":${JSON.stringify(new Date().toISOString())}}`);
     fs.closeSync(fd);
   } catch (err) {
@@ -517,39 +385,38 @@ async function fetchAndCacheReportTables() {
   fs.renameSync(tmpPath, REPORT_TABLES_CACHE_JSON);
 }
 
-// Runs fetchAndCacheReportTables() in a separate `node collector.js
-// --fetch-report-tables` process and waits for it to finish. Never rejects -
-// a failure (including an OOM kill) degrades to { ok: false } so the caller
-// can continue the refresh without cross-revision reviewer history rather
-// than losing the whole run over this one optional enhancement.
+// Runs fetchAndCacheReportTables() in a child process and waits for it.
+// Never rejects: a failure, kill or timeout resolves to { ok: false } so the
+// refresh can continue with the previous cache (or without report data).
 function runReportTablesChildProcess(log) {
   return new Promise((resolve) => {
     const child = fork(__filename, ['--fetch-report-tables'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     let stderrBuf = '';
+    let timedOut = false;
+    const watchdog = setTimeout(() => { timedOut = true; child.kill(); }, REPORT_CHILD_TIMEOUT_MS);
     child.on('message', (msg) => { if (msg && msg.type === 'log') log(msg.text); });
     child.stdout.on('data', (d) => process.stdout.write(d));
-    child.stderr.on('data', (d) => { stderrBuf += d.toString(); process.stderr.write(d); });
-    child.on('error', (err) => resolve({ ok: false, reason: err.message }));
+    child.stderr.on('data', (d) => {
+      if (stderrBuf.length < 4000) stderrBuf += d.toString();
+      process.stderr.write(d);
+    });
+    child.on('error', (err) => { clearTimeout(watchdog); resolve({ ok: false, reason: err.message }); });
     child.on('exit', (code, signal) => {
+      clearTimeout(watchdog);
       if (code === 0) { resolve({ ok: true }); return; }
-      const reason = signal
-        ? `child process killed by ${signal} (likely a host memory/resource limit)`
-        : `child process exited with code ${code}`;
+      const reason = timedOut
+        ? `child process stopped after exceeding ${REPORT_CHILD_TIMEOUT_MS / 60000} minutes`
+        : signal
+          ? `child process killed by ${signal} (possibly a memory limit)`
+          : `child process exited with code ${code}`;
       resolve({ ok: false, reason, stderr: stderrBuf.trim() });
     });
   });
 }
 
-// Freshness of the report-tables cache WITHOUT parsing it: the cache is
-// several hundred MB, and the old way (readJsonSafe the whole file, then look
-// at .CachedAt) meant the long-lived server process held that entire parsed
-// cache in memory even when it was about to be thrown away and refetched -
-// and, worse, while the child process was concurrently streaming its
-// replacement. Both together exceeded the host's memory cap on the first
-// five-table refresh. SchemaVersion/CachedAt are written LAST (see
-// fetchAndCacheReportTables), so the file's final few hundred bytes are enough.
-// Returns null for a missing/unrecognized file, which callers treat as "no
-// usable cache".
+// Reads SchemaVersion/CachedAt from the last bytes of the report-tables cache
+// without parsing the (very large) file. Returns null for a missing or
+// unrecognized file, which callers treat as "no usable cache".
 function peekReportTablesCacheMeta() {
   let fd;
   try {
@@ -570,16 +437,12 @@ function peekReportTablesCacheMeta() {
 // --- completed-task summary (shared by today's snapshot and history) -------
 
 // Within a workflow, "Review Coordinator" and "Submissions" are process/
-// routing groups, not technical review disciplines - the coordinator setup
-// tasks resolved via WFlowActivities (see resolveInstanceID below) mostly
-// land here. Splitting them out as "Operations" keeps the review-group
-// breakdown from being diluted by routing overhead.
+// routing groups, not technical review disciplines. They are reported
+// separately ("Operations", shown as "Routing" on the page) so routing work
+// doesn't dilute the review-group breakdown.
 const OPERATIONS_GROUP_RE = /^(review coordinator|submissions)$/i;
-// Applicant/Fee Group tasks are excluded from every completed-task count
-// regardless of the dashboard's "show self-service tasks" toggle (which only
-// controls whether those groups appear in the workload breakdown) - a
-// self-service task getting marked done isn't staff work, so it has no place
-// in a staff performance count.
+// Applicant/Fee Group tasks are self-service steps, not staff work, and are
+// excluded from every completed-task count.
 const SELF_SERVICE_GROUP_RE = /^(applicant|fee group)$/i;
 
 function sortedCountArray(map, nameField) {
@@ -587,31 +450,20 @@ function sortedCountArray(map, nameField) {
     .map(([k, count]) => ({ [nameField]: k, Count: count }))
     .sort((a, b) => b.Count - a.Count || String(a[nameField]).localeCompare(String(b[nameField])));
 }
-// ByTask is per-person, not per-group - a single "Review Coordinator" total
-// hides that the person did several distinct routing steps (Prescreen, Begin
-// Review, Batch Stamp, ...), which is exactly what the per-employee task
-// breakdown popover on the dashboard needs. Cheap to track for every group,
-// not just Operations ones, so it stays available if a review-group
-// breakdown is ever wanted too.
+// Each user entry carries a per-task breakdown (ByTask), used by the page's
+// task-breakdown popover for routing staff.
 function sortedUserArray(map) {
   return [...map.values()]
     .sort((a, b) => b.Count - a.Count || (a.UserName || '').localeCompare(b.UserName || ''))
     .map((u) => ({ UserID: u.UserID, UserName: u.UserName, Count: u.Count, ByTask: sortedCountArray(u.ByTask, 'TaskName') }));
 }
-// ProjectDox appends " (Reassigned from <PERSON>)" to a task's name when it's
-// reassigned after being accepted, which would otherwise split one real task
-// type into a separate breakdown row per prior assignee (e.g. "Prescreen
-// Review (Main Permit)" vs "Prescreen Review (Main Permit) (Reassigned from
-// LEIDY ORTEGA)"). Greedy .* up to the trailing ")" so a name that itself
-// contains parentheses still strips cleanly. Only applied to the per-person
-// ByTask breakdown - the task's raw TaskName elsewhere (e.g. Task Workload's
-// detail table, or the single-day task list) is left untouched.
-//
-// "Assign Requested Reviews for Department Review for Review Cycle #2" is the
-// same step repeated once per review cycle - shortened to "Assign Requested
-// Reviews" (after the Reassigned strip above, so a reassigned one folds in
-// too), which also merges every cycle's count into one breakdown row instead
-// of one near-identical long row per cycle number.
+// Normalizes a task name for the per-person ByTask breakdown so variants of
+// the same step count together:
+//  - strips the " (Reassigned from <name>)" suffix ProjectDox appends when a
+//    task is reassigned (greedy, so names containing parentheses still work);
+//  - collapses "Assign Requested Reviews for Department Review for Review
+//    Cycle #N" to "Assign Requested Reviews" across cycle numbers.
+// Raw task names are kept everywhere else.
 function baseTaskName(taskName) {
   return (taskName || '')
     .replace(/\s*\(Reassigned from .*\)\s*$/i, '')
@@ -640,7 +492,7 @@ function createCompletedSummary() {
 
   function add(r) {
     const template = r.WorkflowTemplate || 'Unknown';
-    const groupName = r.GroupName || 'Unknown';
+    const groupName = (r.GroupName || '').trim() || 'Unknown';
     const isOps = OPERATIONS_GROUP_RE.test(groupName);
     const userKey = r.UserID != null ? String(r.UserID) : 'unknown';
     const userName = r.UserName || 'Unknown';
@@ -704,49 +556,36 @@ function createCompletedSummary() {
   return { add, finish };
 }
 
-// --- completed-task history (one small file per Eastern calendar day) ---------
+// --- completed-task history (one file per Eastern calendar day) -------------
 //
-// Why files on disk instead of just recomputing from ProjectDox on demand: a
-// completed task is only visible in ONE of two places at a time - the live
-// WFlowTasks table while its workflow instance is still open, then (after a
-// lag) the Report* mirror once the instance closes. In between, it can be in
-// neither (the same gap the completed-today accumulator cache works around).
-// Saving each day's completions as we observe them, and only ever ADDING to
-// a day's file, means a task seen once is never lost. One file per day (not
-// one big file) so a request only loads the days it asked for, one at a time,
-// which keeps memory flat on the memory-limited host regardless of how long
-// a range is.
+// A completed task is visible in live WFlowTasks only while its workflow
+// instance is open, and in the Report* mirror only after the instance closes
+// and the mirror catches up; in between it can be in neither. Each refresh
+// therefore records the completions it sees into a per-day file, and a day's
+// file only ever gains rows, so a task seen once is kept. One file per day
+// lets a range request read only the days it needs, one at a time.
 
 const HISTORY_DIR = path.join(DATA_DIR, 'workload-history');
-migrateLegacyDataFile(path.join(ROOT, 'workload-history'), HISTORY_DIR);
-// Permanent lookups for history (project number/location never change, unlike
-// the short-TTL projectCache which also carries mutable Status), plus short
-// negative caches so a since-deleted user/project/instance isn't re-requested
-// (and re-failing) on every single refresh.
+// Permanent project lookups for history rows (project number, location and
+// description don't change), plus timestamps of failed lookups so a deleted
+// user/project/instance isn't requested again on every refresh.
 const HISTORY_LOOKUPS_JSON = path.join(DATA_DIR, 'workload-history-lookups.json');
-migrateLegacyDataFile(path.join(ROOT, 'workload-history-lookups.json'), HISTORY_LOOKUPS_JSON);
-// How far back the collector keeps history for (it backfills toward this a
-// few days per refresh; see HISTORY_MAX_NEW_DAYS_PER_RUN), overridable.
+const HISTORY_LOOKUP_RETRY_MS = 24 * 3600 * 1000; // wait this long before retrying a failed lookup
+// How many days back history is kept and backfilled.
 const HISTORY_DAYS = Math.max(1, parseInt(process.env.HISTORY_DAYS || '90', 10) || 90);
-// A brand-new backfill can mean hundreds of GetWorkflowInstance/GetProject
-// calls per missing day - capped per run so one refresh isn't stretched out
-// for minutes; history simply fills in over the next few refreshes instead.
+// A missing day can need hundreds of lookups, so backfill is capped per run;
+// history fills in over several refreshes.
 const HISTORY_MAX_NEW_DAYS_PER_RUN = Math.max(0, parseInt(process.env.HISTORY_MAX_NEW_DAYS_PER_RUN || '15', 10) || 15);
-// Recent days are re-derived (rows only ever added, never removed) because a
-// just-closed workflow's tasks can take a while to show up in the Report*
-// mirror - see the block comment above. Older days are treated as settled.
+// Days within this window are re-derived (rows added, never removed) at most
+// every HISTORY_RESETTLE_MIN_AGE_HOURS, because a just-closed workflow's tasks
+// reach the Report* mirror late. Older days are treated as settled.
 const HISTORY_RESETTLE_DAYS = 14;
 const HISTORY_RESETTLE_MIN_AGE_HOURS = 12;
-// One-time opt-in: when a field is added to the compact row schema (e.g.
-// `desc`), only NEW/resettled days pick it up automatically - an
-// already-settled day past the resettle window keeps its old-shape rows
-// forever otherwise. Setting this backfills old days toward that new shape
-// too, a few per run (same budget as new-day backfill). It's self-limiting
-// (see dayNeedsSchemaBackfill) - once every recorded day has the field, it's
-// a cheap no-op, so it's safe to just leave set rather than remembering to
-// unset it.
+// Opt-in: also re-derive settled days whose rows predate a field added to the
+// row format (see dayNeedsSchemaBackfill), a few per run within the same
+// budget as new-day backfill. A no-op once every day has the field.
 const HISTORY_FORCE_RESCHEMA = !!process.env.HISTORY_FORCE_RESCHEMA;
-const HISTORY_MAX_RANGE_DAYS = 400;
+const HISTORY_MAX_RANGE_DAYS = 400; // longest range /history will summarize
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function isValidDateStr(s) {
@@ -754,18 +593,23 @@ function isValidDateStr(s) {
   const d = new Date(s + 'T12:00:00Z');
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
-// Pure calendar arithmetic on YYYY-MM-DD strings (noon UTC), so DST never
-// shifts a date by one.
+// Calendar arithmetic on YYYY-MM-DD strings, anchored at noon UTC so DST
+// changes can never shift a date.
 function addDays(dateStr, n) {
   const d = new Date(dateStr + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
+}
+function daysBetween(from, to) {
+  return Math.round((Date.parse(to + 'T12:00:00Z') - Date.parse(from + 'T12:00:00Z')) / 86400000);
 }
 function listDates(from, to) {
   const out = [];
   for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
   return out;
 }
+// ProjectDox timestamps are naive local (Eastern) times, so "today" is the
+// Eastern calendar date regardless of the server's own time zone.
 function easternToday() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
@@ -783,26 +627,17 @@ function listHistoryDates() {
 function readHistoryDay(date) {
   return readJsonSafe(historyFile(date), null);
 }
-// Written to a temp file then renamed, so a request reading a day while a
-// refresh is rewriting it never sees a half-written file.
 function writeHistoryDay(date, obj) {
   fs.mkdirSync(HISTORY_DIR, { recursive: true });
-  const target = historyFile(date);
-  const tmp = target + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8');
-  fs.renameSync(tmp, target);
+  writeFileAtomic(historyFile(date), JSON.stringify(obj));
 }
 
-// A stored history row is deliberately compact (short keys, no per-task
-// notes) - ~570 completions/day x a year adds up. desc is the PROJECT's own
-// description (one short string per project, not per task), included because
-// the dashboard's individual-reviews list shows it next to the project
-// number.
-//   id=WFlowTaskID wf=workflow template grp=group uid/user=who completed it
-//   task=raw task name pid/proj/loc/desc=project id/number/location/description at=DateCompleted
-// Project number/location are trimmed: this database right-pads CHAR-typed
-// columns with spaces (a location comes back as "421 SE 6 AV" followed by
-// ~35 trailing spaces).
+// Compact stored history row:
+//   id=WFlowTaskID  wf=workflow template  grp=group  uid/user=who completed it
+//   task=raw task name  pid/proj/loc/desc=project id/number/location/description
+//   at=DateCompleted
+// Text fields are trimmed because the database right-pads CHAR columns with
+// spaces.
 function toHistoryRow(r) {
   const trimmed = (s) => (s == null ? null : (String(s).trim() || null));
   return {
@@ -811,12 +646,9 @@ function toHistoryRow(r) {
     desc: trimmed(r.desc), at: r.at || null
   };
 }
-// True if some row in this already-recorded day predates a field being added
-// to the compact row schema (the row object is missing the KEY entirely, not
-// just holding null/undefined for it - toHistoryRow always sets every
-// current key, even to null, so a missing key only happens on rows written
-// before that key existed). Used by HISTORY_FORCE_RESCHEMA to find days that
-// still need a schema backfill, and to stop once none do.
+// True if a recorded day has rows written before the `desc` field existed.
+// toHistoryRow always sets every key (possibly to null), so a missing key
+// means an older row format.
 function dayNeedsSchemaBackfill(date) {
   const day = readHistoryDay(date);
   if (!day || !Array.isArray(day.rows) || !day.rows.length) return false;
@@ -825,11 +657,8 @@ function dayNeedsSchemaBackfill(date) {
 function historyRowToSummaryRow(h) {
   return { WorkflowTemplate: h.wf, GroupName: h.grp, UserID: h.uid, UserName: h.user, TaskName: h.task };
 }
-// Per-day, per-workflow breakdown (plus the Reviews/Operations split within
-// each) for the daily strip chart - a lighter-weight tally than
-// createCompletedSummary(), which also builds ByUser/ByTask breakdowns this
-// chart has no use for. Rows are already self-service-filtered at write time
-// (see SELF_SERVICE_GROUP_RE at pushRow), so nothing to exclude here.
+// Per-workflow counts for one day, split into reviews vs routing, for the
+// page's daily chart. Stored rows are already self-service-filtered.
 function tallyDayByWorkflow(rows) {
   const byWf = new Map();
   for (const h of rows) {
@@ -842,13 +671,14 @@ function tallyDayByWorkflow(rows) {
   return [...byWf.values()].sort((a, b) => b.Count - a.Count || a.WorkflowTemplate.localeCompare(b.WorkflowTemplate));
 }
 
-// Summary (and, for a single day, the task list) for an inclusive date range,
-// read from the day files one at a time. Returns which days in the range have
-// no file yet, so the dashboard can say so instead of silently under-reporting.
+// Summary (and, with includeRows, the task list) for an inclusive date range,
+// read from the day files one at a time. MissingDays lists days with no
+// recorded file so the page can flag them rather than show them as zero.
 async function readHistoryRange(from, to, opts = {}) {
   const includeRows = !!opts.includeRows;
   const dates = listDates(from, to);
-  const available = new Set(listHistoryDates());
+  const allDates = listHistoryDates();
+  const available = new Set(allDates);
   const acc = createCompletedSummary();
   const byDay = [];
   const missingDays = [];
@@ -862,7 +692,6 @@ async function readHistoryRange(from, to, opts = {}) {
     if (includeRows) for (const h of day.rows) rows.push(h);
   }
   if (includeRows) rows.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
-  const allDates = listHistoryDates();
   return {
     from, to,
     Summary: acc.finish(),
@@ -881,16 +710,8 @@ async function runCollector(opts = {}) {
   const startedAt = Date.now();
 
   retryLog = log;
-  log(`Collector build ${COLLECTOR_BUILD}`);
+  log(`Collector version ${APP_VERSION}`);
   log('Loading reference data...');
-  // Fallback map only, used if a live Project/GetProject lookup fails for a
-  // given project - the primary source is the live-resolved projectCache below.
-  const projectFallbackByID = new Map();
-  if (fs.existsSync(PROJECT_LIST_CSV)) {
-    for (const p of readCsv(PROJECT_LIST_CSV)) {
-      if (p.ProjectID) projectFallbackByID.set(p.ProjectID, p);
-    }
-  }
 
   const instanceCache = readJsonSafe(INSTANCE_CACHE_JSON, {});
   log(`${Object.keys(instanceCache).length} workflow instances loaded from cache`);
@@ -905,11 +726,7 @@ async function runCollector(opts = {}) {
   const sessionId = await login();
   log('Logged in.');
 
-  // Pulled live rather than from a one-time-probed local JSON file - that
-  // file was a fine shortcut for local dev (where it already existed from
-  // early API exploration) but doesn't travel with a clean deployment, and
-  // would also silently go stale here if a new workflow template were ever
-  // added. This table is tiny, so fetching it live every run costs nothing.
+  // Workflow template names (a small table, fetched every run).
   const wflows = await queryTable(sessionId, 'WFlows');
   const wflowNameByID = new Map();
   for (const w of wflows) {
@@ -922,59 +739,28 @@ async function runCollector(opts = {}) {
   const reviewCycles = await queryTable(sessionId, 'WFlowReviewCycles');
   log(`WFlowReviewCycles: ${reviewCycles.length} rows`);
 
-  // Routing history's "what did they decide" and its decoder ring - small
-  // enough (a few MB / tens of thousands of rows, no long text columns) to
-  // pull live every run rather than caching, unlike the Report* mirrors
-  // below. WFlowReviewStatusTypes is tiny (~40 rows) - same "fetch live every
-  // run" treatment as WFlows above.
-  const reviews = await queryTable(sessionId, 'WFlowReviews');
-  log(`WFlowReviews: ${reviews.length} rows`);
-  const reviewResults = await queryTable(sessionId, 'WFlowReviewResults');
-  log(`WFlowReviewResults: ${reviewResults.length} rows`);
-  // Real reviewer comment text (found 2026-09-29) - small enough (37.7k rows,
-  // no huge text columns) to pull live every run too, same as WFlowReviews.
-  const checklistInstances = await queryTable(sessionId, 'WFlowReviewChecklistInstances');
-  log(`WFlowReviewChecklistInstances: ${checklistInstances.length} rows`);
-  const reviewStatusTypes = await queryTable(sessionId, 'WFlowReviewStatusTypes');
-  const reviewStatusById = new Map();
-  for (const s of reviewStatusTypes) {
-    if (s.WFlowReviewStatusTypeID != null) reviewStatusById.set(String(s.WFlowReviewStatusTypeID), { name: s.StatusName, isApproved: !!s.IsApprovedType });
-  }
-  log(`${reviewStatusById.size} review status types loaded`);
-
-  // WFlowTasks/WFlowReviewCycles only carry currently-open/active instances -
-  // once a workflow instance closes (e.g. a superseded revision), its rows
-  // drop out of these tables entirely. Reviewer history for a re-review needs
-  // closed instances too, so that join also pulls from ReportWFlowTasks/
-  // ReportWFlowReviewCycles - a separate, ~500k-row append-only mirror that
-  // retains closed-instance rows the live tables don't (see the big comment
-  // further down at completedTasksByInstanceGroup for why BOTH sources are
-  // needed, not just this one). Cached to disk with a long TTL since it's
-  // pure history that doesn't change once written - see
-  // MAX_REPORT_TABLES_CACHE_AGE_MIN above. The fetch itself runs in a child
-  // process (see runReportTablesChildProcess) so its large raw-row memory
-  // footprint never has to coexist with the rest of this process's own
-  // memory - see the comment on that function for why.
+  // Live WFlowTasks/WFlowReviewCycles hold only open/active workflow
+  // instances; a closed instance's rows exist only in the Report* mirror.
+  // Both sources are needed (see completedTasksByInstanceGroup below). The
+  // mirror is cached on disk and refetched by a child process when stale.
+  //
+  // The cache is parsed at most once per run and never while the child is
+  // running: its age is read from the file's tail first, then it is either
+  // loaded directly (fresh) or refetched and loaded afterwards. If the
+  // refetch fails, the previous cache (left intact by the child's
+  // temp-file-and-rename write) is used instead.
   const now = Date.now();
-  // Only ever ONE parse of this (very large) cache per run, and never while
-  // the child is alive: peek at its age cheaply first, then either load it
-  // (fresh), or run the child and load whatever is on disk afterwards - the
-  // child writes via temp file + rename, so if it fails the previous cache is
-  // still there intact and is used as a fallback instead of nothing.
   const cacheMeta = peekReportTablesCacheMeta();
   const reportTablesCacheAgeMin = cacheMeta ? (now - new Date(cacheMeta.CachedAt).getTime()) / 60000 : Infinity;
   const reportTablesCacheFresh = !!cacheMeta && cacheMeta.SchemaVersion === CACHE_SCHEMA_VERSION && reportTablesCacheAgeMin < MAX_REPORT_TABLES_CACHE_AGE_MIN;
-  let reportTasks, reportReviewCycles, reportReviews, reportReviewResults, reportChecklistInstances;
+  let reportTasks, reportReviewCycles;
   const useReportTables = (data) => {
     reportTasks = data.reportTasks;
-    reportReviewCycles = data.reportReviewCycles;
-    reportReviews = data.reportReviews || [];
-    reportReviewResults = data.reportReviewResults || [];
-    reportChecklistInstances = data.reportChecklistInstances || [];
+    reportReviewCycles = data.reportReviewCycles || [];
   };
   const usable = (data) => !!data && data.SchemaVersion === CACHE_SCHEMA_VERSION && Array.isArray(data.reportTasks);
-  const reportRowCounts = () => `${reportTasks.length}/${reportReviewCycles.length}/${reportReviews.length}/${reportReviewResults.length}/${reportChecklistInstances.length}`;
-  const reportTablesLabel = 'ReportWFlowTasks/ReportWFlowReviewCycles/ReportWFlowReviews/ReportWFlowReviewResults/ReportWFlowReviewChecklistInstances';
+  const reportRowCounts = () => `${reportTasks.length}/${reportReviewCycles.length}`;
+  const reportTablesLabel = 'ReportWFlowTasks/ReportWFlowReviewCycles';
   let loadedFromFreshCache = false;
   if (reportTablesCacheFresh) {
     const cached = readJsonSafe(REPORT_TABLES_CACHE_JSON, null);
@@ -985,7 +771,7 @@ async function runCollector(opts = {}) {
     }
   }
   if (!loadedFromFreshCache) {
-    log(`Fetching ${reportTablesLabel} in a separate process (keeps their large peak memory off the main server process)...`);
+    log(`Fetching ${reportTablesLabel} in a separate process...`);
     const result = await runReportTablesChildProcess(log);
     const onDisk = readJsonSafe(REPORT_TABLES_CACHE_JSON, null);
     if (result.ok && usable(onDisk)) {
@@ -999,27 +785,17 @@ async function runCollector(opts = {}) {
         const ageMin = onDisk.CachedAt ? Math.round((Date.now() - new Date(onDisk.CachedAt).getTime()) / 60000) : '?';
         log(`WARN: could not refresh report tables (${why}) - using the previous cached copy (${ageMin}m old: ${reportRowCounts()} rows) for this run instead.`);
       } else {
-        log(`WARN: could not fetch report tables (${why}) - continuing without cross-revision reviewer history, routing history, or comments for this run.`);
+        log(`WARN: could not fetch report tables (${why}) - continuing without closed-instance data for this run.`);
         reportTasks = [];
         reportReviewCycles = [];
-        reportReviews = [];
-        reportReviewResults = [];
-        reportChecklistInstances = [];
       }
     }
   }
 
-  // Each review cycle carries both which instance (project) it belongs to
-  // and its cycle number (1, 2, 3...) - the cycle number is what lets us tell
-  // "this group already reviewed this project once before" apart from a
-  // first-time review.
-  //
-  // Also merges in ReportWFlowReviewCycles (live takes precedence; report
-  // only fills in cycle IDs the live table doesn't have) - live
-  // WFlowReviewCycles drops a row entirely the moment its instance closes,
-  // so a cycle whose workflow terminated has no other way to resolve to an
-  // instance at all. Needed so a "completed today" task from
-  // ReportWFlowTasks (below) can still be traced back to its project.
+  // Review cycle ID -> { instance, cycle number }. The cycle number tells a
+  // re-review (cycle 2+) apart from a first review. Live rows take
+  // precedence; Report rows fill in cycles of instances that have closed, so
+  // tasks found only in ReportWFlowTasks can still be traced to a project.
   const cycleInfo = new Map();
   for (const c of reviewCycles) {
     if (c.WFlowReviewCycleID != null) {
@@ -1031,18 +807,12 @@ async function runCollector(opts = {}) {
       cycleInfo.set(String(c.WFlowReviewCycleID), { WFlowInstanceID: c.WFlowInstanceID, ReviewCycle: c.ReviewCycle });
     }
   }
-  const cycleToInstance = new Map(); // kept as a simple id->instance map for the rest of the pipeline
+  const cycleToInstance = new Map(); // cycle ID -> instance ID
   for (const [cycleId, info] of cycleInfo) cycleToInstance.set(cycleId, info.WFlowInstanceID);
 
-  // Not every task belongs to a review cycle - a workflow's coordinator-only
-  // setup tasks (e.g. "Board Or Committee Selection"), which happen before
-  // any department review cycle starts, have WFlowReviewCycleID = null and
-  // were previously invisible to this dashboard entirely (confirmed live:
-  // 314 such open Review Coordinator tasks exist system-wide). WFlowActivities
-  // carries WFlowInstanceID directly, so WFlowTaskID -> WFlowActivityID ->
-  // WFlowActivities.WFlowInstanceID resolves these the same way cycle-based
-  // tasks resolve via WFlowReviewCycleID - used as a fallback wherever a
-  // task has no cycle to resolve through.
+  // Coordinator setup tasks that run before any review cycle (e.g. "Board Or
+  // Committee Selection") have no WFlowReviewCycleID. They resolve to their
+  // instance through WFlowActivityID -> WFlowActivities.WFlowInstanceID.
   const activities = await queryTable(sessionId, 'WFlowActivities');
   log(`WFlowActivities: ${activities.length} rows`);
   const activityToInstance = new Map();
@@ -1058,21 +828,13 @@ async function runCollector(opts = {}) {
     return undefined;
   }
 
-  // Also pulls in tasks Completed today, alongside the normal Pending/
-  // Accepted "open" set - lets the dashboard optionally show today's
-  // completed work per group. Variable name kept as openTasks since it
-  // still drives the exact same downstream join; only the eligibility
-  // filter changed.
+  // Task status IDs: 1 = Completed, 2 = Accepted, 3 = Pending.
   //
-  // "Today" is compared using Eastern time (America/New_York), not UTC:
-  // DateCompleted comes back from the API as a naive timestamp with no
-  // timezone marker (e.g. "2026-06-10T16:58:28.843") which is already
-  // Pompano Beach's own local time, not UTC. Comparing that string's date
-  // directly against a UTC "today" would put the day boundary several hours
-  // off from what "today" actually means to City staff using this.
-  const todayEastern = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).format(new Date());
+  // openTasks = open (Pending/Accepted) tasks plus tasks completed today.
+  // DateCompleted is a naive Eastern-time timestamp (e.g.
+  // "2026-06-10T16:58:28.843"), so its date part is compared with the
+  // Eastern calendar date.
+  const todayEastern = easternToday();
   const isCompletedTodayCandidate = (t) =>
     t.WFlowTaskStatusTypeID === 1 && t.DateCompleted && t.DateCompleted.slice(0, 10) === todayEastern;
   const openTasks = tasks.filter((t) => {
@@ -1081,14 +843,9 @@ async function runCollector(opts = {}) {
     if (isCompletedTodayCandidate(t)) return true;
     return false;
   });
-  // Live WFlowTasks drops a row entirely (not just marks it inactive) the
-  // moment its instance closes, so a task completed today whose workflow
-  // ALSO terminated today - a common sequence, since there's often nothing
-  // left to do once the last review is in - would otherwise silently vanish
-  // from "completed today" with no trace, even though it's a real event
-  // that happened today. ReportWFlowTasks retains it; merge in whatever the
-  // live pull didn't already have (dedupe by WFlowTaskID - an instance that
-  // closed between the two queries could plausibly appear in both).
+  // A task completed today whose workflow also closed today is gone from live
+  // WFlowTasks but present in ReportWFlowTasks; add those (deduped by task ID,
+  // since an instance closing between the two queries can appear in both).
   const openTaskIDs = new Set(openTasks.map((t) => t.WFlowTaskID));
   let reportOnlyCompletedToday = 0;
   for (const t of reportTasks) {
@@ -1103,176 +860,23 @@ async function runCollector(opts = {}) {
   )];
   log(`${distinctInstanceIDs.length} distinct workflow instances referenced.`);
 
-  const toResolve = distinctInstanceIDs.filter((id) => {
-    const entry = instanceCache[String(id)];
-    if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return true;
-    return (now - new Date(entry.CachedAt).getTime()) / 60000 >= MAX_INSTANCE_CACHE_AGE_MIN;
-  });
+  const toResolve = distinctInstanceIDs.filter((id) => !isFresh(instanceCache[String(id)], MAX_INSTANCE_CACHE_AGE_MIN, now));
   log(`${toResolve.length} instance(s) need a fresh lookup (${distinctInstanceIDs.length - toResolve.length} from cache).`);
 
   let resolvedCount = 0;
   await mapConcurrent(toResolve, CONCURRENCY, async (id) => {
     try {
-      const inst = await getWorkflowInstance(sessionId, id);
-      instanceCache[String(id)] = {
-        WFlowInstanceID: inst.WFlowInstanceID,
-        WFlowID: inst.WFlowID,
-        EntityID: inst.EntityID,
-        WFlowInstanceStateID: inst.WFlowInstanceStateID,
-        WFlowInstanceStateName: inst.WFlowInstanceStateName,
-        InstanceName: inst.InstanceName,
-        Revision: parseRevision(inst.InstanceName),
-        DateCompleted: inst.DateCompleted,
-        SchemaVersion: CACHE_SCHEMA_VERSION,
-        CachedAt: new Date().toISOString()
-      };
+      instanceCache[String(id)] = instanceCacheEntry(await getWorkflowInstance(sessionId, id));
     } catch (e) {
       log(`WARN GetWorkflowInstance(${id}) failed: ${e.message}`);
     }
     resolvedCount++;
-    if (resolvedCount % 100 === 0) writeJson(INSTANCE_CACHE_JSON, instanceCache);
+    if (resolvedCount % 100 === 0) writeJson(INSTANCE_CACHE_JSON, instanceCache); // checkpoint long cold runs
   });
   writeJson(INSTANCE_CACHE_JSON, instanceCache);
   log(`Instance cache saved (${Object.keys(instanceCache).length} total entries).`);
 
-  // --- routing history: department/cycle/decision over time, for permit-status.js ---
-  //
-  // Unlike everything above, this has to cover every project that has EVER
-  // had a review, not just ones with a currently-open task - so it needs
-  // WFlowInstanceID -> ProjectID for instances instanceCache never had a
-  // reason to resolve before. That resolution is its own capped pass (see
-  // MAX_REVIEW_INSTANCE_BACKFILL_PER_RUN) so a large one-time backfill can't
-  // stretch out every future run, only the first several after this shipped.
-  const allReviews = new Map(); // WFlowReviewID -> row (live overwrites report - see the loop order)
-  for (const r of reportReviews) { if (r.WFlowReviewID != null) allReviews.set(r.WFlowReviewID, r); }
-  for (const r of reviews) { if (r.WFlowReviewID != null) allReviews.set(r.WFlowReviewID, r); }
-  log(`Routing history: ${allReviews.size} distinct review(s) across live + historical tables.`);
-
-  // A review links to its cycle NUMBER via WFlowActivityGroupingInstanceID,
-  // not WFlowReviewCycleID directly - same join key WFlowReviewCycles uses.
-  // Also need the actual WFlowReviewCycleID (not just its number) to look up
-  // comments below, which are keyed by the real ID.
-  const groupingToCycle = new Map();
-  const groupingToCycleID = new Map();
-  for (const c of reportReviewCycles) {
-    if (c.WFlowActivityGroupingInstanceID == null) continue;
-    groupingToCycle.set(String(c.WFlowActivityGroupingInstanceID), c.ReviewCycle);
-    groupingToCycleID.set(String(c.WFlowActivityGroupingInstanceID), c.WFlowReviewCycleID);
-  }
-  for (const c of reviewCycles) {
-    if (c.WFlowActivityGroupingInstanceID == null) continue;
-    groupingToCycle.set(String(c.WFlowActivityGroupingInstanceID), c.ReviewCycle);
-    groupingToCycleID.set(String(c.WFlowActivityGroupingInstanceID), c.WFlowReviewCycleID);
-  }
-
-  // GroupID isn't a stable department identity across instances/revisions
-  // (see completedTasksByInstanceGroup below), but WFlowTasks/ReportWFlowTasks
-  // already carry GroupID+GroupName denormalized on every row - reusing that
-  // (already in memory) avoids pulling the separate, much larger Groups table
-  // just to answer "what's this one GroupID called".
-  const groupIdToName = new Map();
-  for (const t of reportTasks) { if (t.GroupID != null && t.GroupName) groupIdToName.set(String(t.GroupID), t.GroupName.trim()); }
-  for (const t of tasks) { if (t.GroupID != null && t.GroupName) groupIdToName.set(String(t.GroupID), t.GroupName.trim()); }
-
-  // A review's recorded decision, if any - takes the most recently updated
-  // result row per review, in case more than one was ever recorded for it.
-  const latestResultByReviewID = new Map();
-  for (const res of [...reportReviewResults, ...reviewResults]) {
-    if (res.WFlowReviewID == null) continue;
-    const existing = latestResultByReviewID.get(res.WFlowReviewID);
-    const resDate = res.DateUpdated || res.DateCreated || '';
-    if (!existing || resDate > (existing.DateUpdated || existing.DateCreated || '')) latestResultByReviewID.set(res.WFlowReviewID, res);
-  }
-
-  // Real reviewer comments (found 2026-09-29): keyed by (instance, group,
-  // cycle ID) - NOT cycle NUMBER, since that's what the raw table itself
-  // carries. Deduped by WFlowReviewChecklistInstanceID (live wins) the same
-  // way everything else here handles the live/report overlap window.
-  const allChecklistInstances = new Map();
-  for (const c of reportChecklistInstances) { if (c.WFlowReviewChecklistInstanceID != null) allChecklistInstances.set(c.WFlowReviewChecklistInstanceID, c); }
-  for (const c of checklistInstances) { if (c.WFlowReviewChecklistInstanceID != null) allChecklistInstances.set(c.WFlowReviewChecklistInstanceID, c); }
-  const commentsByInstanceGroupCycle = new Map(); // "instanceID::groupID::cycleID" -> comment[]
-  for (const c of allChecklistInstances.values()) {
-    if (c.WFlowInstanceID == null || c.GroupID == null || c.WFlowReviewCycleID == null) continue;
-    if (!c.CommentText && !c.ResponseText) continue; // nothing to show
-    const key = `${c.WFlowInstanceID}::${c.GroupID}::${c.WFlowReviewCycleID}`;
-    if (!commentsByInstanceGroupCycle.has(key)) commentsByInstanceGroupCycle.set(key, []);
-    commentsByInstanceGroupCycle.get(key).push({
-      commentText: c.CommentText || null, responseText: c.ResponseText || null,
-      referenceNumber: c.ReferenceNumber ?? null, dateCreated: c.DateCreated || null
-    });
-  }
-  for (const list of commentsByInstanceGroupCycle.values()) list.sort((a, b) => (a.referenceNumber ?? 0) - (b.referenceNumber ?? 0));
-  log(`${allChecklistInstances.size} checklist-comment instance(s) across live + historical tables, ${commentsByInstanceGroupCycle.size} distinct (instance, group, cycle) combination(s) with real text.`);
-
-  const reviewInstanceIDs = [...new Set([...allReviews.values()].map((r) => r.WFlowInstanceID).filter((id) => id != null))];
-  const reviewInstancesToResolve = reviewInstanceIDs.filter((id) => {
-    const entry = instanceCache[String(id)];
-    return !entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION;
-  });
-  const thisRunBackfill = reviewInstancesToResolve.slice(0, MAX_REVIEW_INSTANCE_BACKFILL_PER_RUN);
-  log(`Routing history references ${reviewInstanceIDs.length} distinct instance(s); ${reviewInstancesToResolve.length} not yet cached, resolving ${thisRunBackfill.length} this run (capped at ${MAX_REVIEW_INSTANCE_BACKFILL_PER_RUN}/run - the rest pick up on later runs).`);
-
-  let backfillResolvedCount = 0;
-  await mapConcurrent(thisRunBackfill, CONCURRENCY, async (id) => {
-    try {
-      const inst = await getWorkflowInstance(sessionId, id);
-      instanceCache[String(id)] = {
-        WFlowInstanceID: inst.WFlowInstanceID, WFlowID: inst.WFlowID, EntityID: inst.EntityID,
-        WFlowInstanceStateID: inst.WFlowInstanceStateID, WFlowInstanceStateName: inst.WFlowInstanceStateName,
-        InstanceName: inst.InstanceName, Revision: parseRevision(inst.InstanceName), DateCompleted: inst.DateCompleted,
-        SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString()
-      };
-    } catch (e) {
-      log(`WARN routing history: GetWorkflowInstance(${id}) failed: ${e.message}`);
-    }
-    backfillResolvedCount++;
-    if (backfillResolvedCount % 100 === 0) writeJson(INSTANCE_CACHE_JSON, instanceCache);
-  });
-  if (thisRunBackfill.length) writeJson(INSTANCE_CACHE_JSON, instanceCache);
-
-  const routingByProject = new Map(); // ProjectID -> entry[]
-  let skippedNoInstance = 0, skippedNoDate = 0;
-  for (const [reviewId, r] of allReviews) {
-    const inst = r.WFlowInstanceID != null ? instanceCache[String(r.WFlowInstanceID)] : null;
-    if (!inst || inst.EntityID == null) { skippedNoInstance++; continue; }
-
-    const result = latestResultByReviewID.get(reviewId);
-    const status = result ? reviewStatusById.get(String(result.WFlowReviewStatusTypeID)) : null;
-    const dateCompleted = r.DateCompleted || (result ? (result.DateUpdated || result.DateCreated) : null);
-    // A review with no completion date yet is still in progress - that's
-    // already covered by the live "current review steps" data, not history.
-    if (!dateCompleted) { skippedNoDate++; continue; }
-
-    const cycleID = groupingToCycleID.get(String(r.WFlowActivityGroupingInstanceID));
-    const comments = (r.GroupID != null && cycleID != null)
-      ? commentsByInstanceGroupCycle.get(`${r.WFlowInstanceID}::${r.GroupID}::${cycleID}`) || []
-      : [];
-
-    const entry = {
-      revision: inst.Revision || 0,
-      cycle: groupingToCycle.has(String(r.WFlowActivityGroupingInstanceID)) ? groupingToCycle.get(String(r.WFlowActivityGroupingInstanceID)) : null,
-      department: groupIdToName.get(String(r.GroupID)) || null,
-      decision: status ? status.name : null,
-      isApprovedType: status ? status.isApproved : null,
-      dateCompleted,
-      comments
-    };
-    if (!routingByProject.has(inst.EntityID)) routingByProject.set(inst.EntityID, []);
-    routingByProject.get(inst.EntityID).push(entry);
-  }
-  if (skippedNoInstance) log(`Routing history: ${skippedNoInstance} review(s) skipped - instance not resolved yet (will retry as backfill continues).`);
-  if (skippedNoDate) log(`Routing history: ${skippedNoDate} review(s) skipped - still in progress, no completion date yet.`);
-
-  const routingHistoryOut = {};
-  for (const [projectId, entries] of routingByProject) {
-    entries.sort((a, b) => String(a.dateCompleted).localeCompare(String(b.dateCompleted))); // oldest first - reads as a timeline
-    routingHistoryOut[projectId] = entries;
-  }
-  writeJson(ROUTING_HISTORY_JSON, { GeneratedAt: new Date().toISOString(), Projects: routingHistoryOut });
-  log(`Routing history written for ${Object.keys(routingHistoryOut).length} project(s) (${path.basename(ROUTING_HISTORY_JSON)}).`);
-
-  // --- resolve project name/status for distinct referenced ACTIVE projects (short-TTL cache) ---
+  // --- project name/status for projects with an Active instance (short-TTL cache) ---
   const distinctProjectIDs = [...new Set(
     distinctInstanceIDs
       .map((id) => instanceCache[String(id)])
@@ -1280,11 +884,7 @@ async function runCollector(opts = {}) {
       .map((inst) => inst.EntityID)
       .filter((id) => id != null)
   )];
-  const projectsToResolve = distinctProjectIDs.filter((id) => {
-    const entry = projectCache[String(id)];
-    if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return true;
-    return (now - new Date(entry.CachedAt).getTime()) / 60000 >= MAX_PROJECT_CACHE_AGE_MIN;
-  });
+  const projectsToResolve = distinctProjectIDs.filter((id) => !isFresh(projectCache[String(id)], MAX_PROJECT_CACHE_AGE_MIN, now));
   log(`${distinctProjectIDs.length} distinct project(s) referenced; ${projectsToResolve.length} need a fresh lookup (TTL ${MAX_PROJECT_CACHE_AGE_MIN}m).`);
 
   let projectResolvedCount = 0;
@@ -1296,16 +896,15 @@ async function runCollector(opts = {}) {
       log(`WARN GetProject(${id}) failed: ${e.message}`);
     }
     projectResolvedCount++;
-    if (projectResolvedCount % 100 === 0) writeJson(PROJECT_CACHE_JSON, projectCache);
+    if (projectResolvedCount % 100 === 0) writeJson(PROJECT_CACHE_JSON, projectCache); // checkpoint long cold runs
   });
   writeJson(PROJECT_CACHE_JSON, projectCache);
   log(`Project cache saved (${Object.keys(projectCache).length} total entries).`);
 
-  // --- discover sibling revision instances, only for projects that actually
-  // need one: an open task sitting at Cycle 1 of a Revision >= 1 instance has
-  // no earlier cycle of its OWN to look back at (each revision is its own
-  // instance with its own cycle counter), so the relevant history lives in
-  // the previous revision's instance instead. ---
+  // --- earlier-revision instances, for projects that need them ---
+  // An open task at Cycle 1 of Revision 1+ has no earlier cycle in its own
+  // instance, so its prior reviewers are found in earlier revisions'
+  // instances, listed by GetWorkflowInstancesByProjectName.
   const revisionInstancesCache = readJsonSafe(REVISION_INSTANCES_CACHE_JSON, {});
   const projectsNeedingRevisionHistory = [...new Set(
     openTasks
@@ -1319,18 +918,14 @@ async function runCollector(opts = {}) {
       })
       .filter((id) => id != null)
   )];
-  const revisionProjectsToResolve = projectsNeedingRevisionHistory.filter((id) => {
-    const entry = revisionInstancesCache[String(id)];
-    if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return true;
-    return (now - new Date(entry.CachedAt).getTime()) / 60000 >= MAX_REVISION_CACHE_AGE_MIN;
-  });
+  const revisionProjectsToResolve = projectsNeedingRevisionHistory.filter((id) => !isFresh(revisionInstancesCache[String(id)], MAX_REVISION_CACHE_AGE_MIN, now));
   log(`${projectsNeedingRevisionHistory.length} project(s) need cross-revision reviewer history; ${revisionProjectsToResolve.length} need a fresh lookup.`);
 
   let revisionResolvedCount = 0;
   await mapConcurrent(revisionProjectsToResolve, CONCURRENCY, async (projectId) => {
-    const proj = projectCache[String(projectId)] || projectFallbackByID.get(String(projectId));
+    const proj = projectCache[String(projectId)];
     const projectName = proj ? proj.Name : null;
-    if (!projectName) return; // can't look this up without the project number
+    if (!projectName) return; // the lookup is by project number
     try {
       const instances = await getWorkflowInstancesByProjectName(sessionId, projectName);
       revisionInstancesCache[String(projectId)] = {
@@ -1349,13 +944,10 @@ async function runCollector(opts = {}) {
   writeJson(REVISION_INSTANCES_CACHE_JSON, revisionInstancesCache);
   log(`Revision instance cache saved (${Object.keys(revisionInstancesCache).length} project entries).`);
 
-  // For each open task needing it, find EVERY earlier-revision instance, not
-  // just the immediately preceding one - a given revision can leave a group
-  // untouched entirely (e.g. a minor revision that never reached Zoning
-  // again), so the reviewer who actually last worked this group might be two
-  // or more revisions further back than the one right before this task's.
-  // Sorted nearest-revision-first so the lookup below stops at the closest
-  // one that actually has data.
+  // Instance -> every earlier-revision instance of the same project, nearest
+  // first. All of them are kept, not just the previous one, because a
+  // revision may not have been routed to a given group at all; the lookup
+  // below walks back until it finds one that was.
   const earlierRevisionInstancesByInstance = new Map(); // wflowInstanceID -> [earlier-revision wflowInstanceIDs, nearest first]
   for (const [projectId, entry] of Object.entries(revisionInstancesCache)) {
     const list = (entry.instances || []).filter((i) => i.Revision != null).sort((a, b) => b.Revision - a.Revision);
@@ -1365,23 +957,18 @@ async function runCollector(opts = {}) {
     }
   }
 
-  // --- build re-review history: for each open task, who (if anyone) reviewed
-  // the same project, for the same review group, on an earlier cycle (same
-  // revision) or an earlier revision's last cycle. Built entirely from the
-  // WFlowTasks pull already in memory (Completed status = 1), scoped to the
-  // instances that actually matter: currently-open-task instances plus
-  // whatever earlier-revision instances were just discovered above. ---
+  // --- re-review history ---
+  // For each open task: who completed the same group's review of the same
+  // project on an earlier cycle (same revision) or in an earlier revision.
+  // Built from completed tasks already in memory, limited to the instances
+  // of open tasks plus their earlier-revision instances.
   const relevantInstanceSet = new Set(distinctInstanceIDs.map(String));
   for (const ids of earlierRevisionInstancesByInstance.values()) {
     for (const id of ids) relevantInstanceSet.add(String(id));
   }
 
-  // Revision numbers for every instance we know about - the main instance
-  // cache only covers CURRENTLY active instances (resolved via the full
-  // per-instance GetWorkflowInstance call); previous-revision sibling
-  // instances were only fetched cheaply via GetWorkflowInstancesByProjectName
-  // above and never got added to instanceCache, so their Revision has to
-  // come from revisionInstancesCache instead or this silently comes back null.
+  // Revision number per instance. Earlier-revision instances are only in
+  // revisionInstancesCache, not instanceCache, so both are read.
   const revisionByInstanceId = new Map();
   for (const [id, cachedInst] of Object.entries(instanceCache)) {
     if (cachedInst.Revision != null) revisionByInstanceId.set(String(id), cachedInst.Revision);
@@ -1392,44 +979,18 @@ async function runCollector(opts = {}) {
     }
   }
 
-  // Built from BOTH WFlowTasks/WFlowReviewCycles (live) AND ReportWFlowTasks/
-  // ReportWFlowReviewCycles (historical mirror) - neither is complete alone.
-  // The live tables only carry currently-open/active instances, so a closed
-  // instance's history (e.g. a superseded revision) is entirely absent from
-  // them. The Report* tables looked like the fix, but turned out to be the
-  // mirror image of the same problem: probing them confirmed they DO retain
-  // closed-instance rows, yet after switching to them exclusively, EVERY
-  // same-instance earlier-cycle lookup (cycle 2+ of a still-open instance)
-  // came back empty - strong evidence the Report* mirror is populated by a
-  // batch sync keyed off instance closure, so a still-active instance's
-  // already-completed earlier cycles simply aren't copied over yet. Live
-  // tables cover "still open," Report tables cover "already closed" - only
-  // the union covers both.
+  // Completed tasks come from both live WFlowTasks and ReportWFlowTasks:
+  // live covers instances that are still open (their earlier cycles are not
+  // yet in the mirror), Report covers instances that have closed.
   //
-  // Keyed by GroupName, not GroupID: GroupID is a per-workflow-instance
-  // routing-slip row ID, freshly issued whenever a revision's workflow is
-  // (re-)initiated - it is NOT a stable department identifier across
-  // instances/revisions, even though it happens to stay constant across
-  // cycles within the same instance. GroupName is the stable identity (it's
-  // what the rest of this file already groups departments by - see the
-  // `${r.WorkflowTemplate}::${r.GroupName}` key below), so cross-revision
-  // lookups must match on it instead or they silently miss real history.
-  //
-  // GroupName is trimmed/case-folded on every use below: this database
-  // right-pads some CHAR-typed columns with spaces (seen already on
-  // ProjectDescription / ProjectLocation), and ReportWFlowTasks.GroupName
-  // doesn't necessarily match WFlowTasks.GroupName byte-for-byte even for
-  // the identical department - an unnormalized compare silently matches
-  // nothing at all.
+  // Keyed by group NAME, not GroupID. GroupID is issued per workflow
+  // instance, so it differs between revisions of the same project; the name
+  // identifies the department. Names are whitespace-normalized and
+  // upper-cased because the two tables don't always match byte for byte
+  // (e.g. CHAR padding).
   const normGroupName = (name) => (name || '').replace(/\s+/g, ' ').trim().toUpperCase();
-  const reportCycleInfo = new Map();
-  for (const c of reportReviewCycles) {
-    if (c.WFlowReviewCycleID != null) {
-      reportCycleInfo.set(String(c.WFlowReviewCycleID), { WFlowInstanceID: c.WFlowInstanceID, ReviewCycle: c.ReviewCycle });
-    }
-  }
-  const completedTasksByInstanceGroup = new Map(); // "instanceId::groupName" -> [{WFlowTaskID, Revision, ReviewCycle, UserID, DateCompleted, TaskName}]
-  const seenTaskIDs = new Set(); // dedupe: a task that's already in both sources (e.g. an instance that closed between the two queries) shouldn't be counted twice
+  const completedTasksByInstanceGroup = new Map(); // "instanceId::groupName" -> [{Revision, ReviewCycle, UserID, DateCompleted, TaskName}]
+  const seenTaskIDs = new Set(); // a task can appear in both sources if its instance closed between the two queries
   const addCompletedTask = (t, info) => {
     if (t.WFlowTaskStatusTypeID !== 1 || !t.WFlowReviewCycleID) return; // 1 = Completed
     if (!info || !relevantInstanceSet.has(String(info.WFlowInstanceID))) return;
@@ -1445,11 +1006,10 @@ async function runCollector(opts = {}) {
     });
   };
   for (const t of tasks) addCompletedTask(t, cycleInfo.get(String(t.WFlowReviewCycleID)));
-  for (const t of reportTasks) addCompletedTask(t, reportCycleInfo.get(String(t.WFlowReviewCycleID)));
-  // DateCompleted as a third tiebreaker: the same group can complete more
-  // than one task within what's nominally the same (Revision, Cycle) - e.g.
-  // reassigned mid-review - so ties need the actual most-recent completion,
-  // not whatever order they happened to come out of the WFlowTasks pull in.
+  for (const t of reportTasks) addCompletedTask(t, cycleInfo.get(String(t.WFlowReviewCycleID)));
+  // Most recent first: by revision, then cycle, then completion time (a
+  // group can complete more than one task in the same cycle, e.g. after a
+  // reassignment).
   const byRevisionThenCycleThenDate = (a, b) =>
     (b.Revision || 0) - (a.Revision || 0) ||
     (b.ReviewCycle || 0) - (a.ReviewCycle || 0) ||
@@ -1464,19 +1024,13 @@ async function runCollector(opts = {}) {
     const inst = wflowInstanceID != null ? instanceCache[String(wflowInstanceID)] : null;
 
     if (!inst) { skippedUnresolved++; continue; }
-    // Only Pending/Accepted tasks need their parent workflow to still be
-    // Active - a stale open task on an abandoned/terminated workflow
-    // shouldn't show as work someone could pick up. A Completed task is a
-    // historical fact regardless of what happened to the instance
-    // afterward, so it must NOT be filtered out here - a workflow commonly
-    // terminates the same day its last reviews complete (nothing left to
-    // do), which was silently dropping that day's completions from the
-    // "completed today" feature before this exclusion was added.
+    // Open tasks are shown only while their workflow is Active; a pending
+    // task on a terminated workflow isn't real work. Completed tasks are kept
+    // regardless, since a workflow often closes the day its last review is done.
     if (t.WFlowTaskStatusTypeID !== 1 && inst.WFlowInstanceStateID !== 1) { skippedNotActive++; continue; } // 1 = Active
 
     const status = t.WFlowTaskStatusTypeID === 2 ? 'Accepted' : t.WFlowTaskStatusTypeID === 3 ? 'Pending' : t.WFlowTaskStatusTypeID === 1 ? 'Completed' : `Unknown(${t.WFlowTaskStatusTypeID})`;
-    const cachedProj = projectCache[String(inst.EntityID)];
-    const proj = cachedProj || projectFallbackByID.get(String(inst.EntityID));
+    const proj = projectCache[String(inst.EntityID)];
     const templateName = wflowNameByID.get(String(inst.WFlowID)) || `WFlow${inst.WFlowID}`;
 
     const thisCycleInfo = cycleInfo.get(String(t.WFlowReviewCycleID));
@@ -1486,13 +1040,8 @@ async function runCollector(opts = {}) {
     // Same-instance (same revision) earlier-cycle history.
     let priorReviews = (completedTasksByInstanceGroup.get(`${wflowInstanceID}::${normGroupName(t.GroupName)}`) || [])
       .filter((e) => reviewCycle == null || (e.ReviewCycle || 0) < reviewCycle);
-    // Cycle 1 of a revision has no same-instance history by definition - walk
-    // backwards through earlier revisions (nearest first) and stop at the
-    // first one that actually has a completed review for this group. Don't
-    // stop at the immediately-preceding revision unconditionally - it may
-    // never have touched this group at all (e.g. a minor revision that
-    // didn't get re-routed to Zoning), which would wrongly report "no prior
-    // reviewer" when an earlier revision's approval is the real answer.
+    // Cycle 1 of a revision: use the nearest earlier revision that has a
+    // completed review for this group.
     if (!priorReviews.length && reviewCycle === 1 && thisRevision > 0) {
       const earlierIds = earlierRevisionInstancesByInstance.get(String(wflowInstanceID)) || [];
       for (const earlierId of earlierIds) {
@@ -1520,20 +1069,15 @@ async function runCollector(opts = {}) {
       ProjectDescription: proj ? proj.Description : null,
       ProjectLocation: proj ? proj.Location : null,
       AssignedUserName: null,
-      // WFlowTaskAssignmentTypeID: 1=Individual (pre-assigned to one named
-      // person - UserID is already set even before they've formally
-      // accepted it), 2=FirstInGroup (open to whoever in the group grabs it
-      // first - the normal "Pending" case), 3=AllInGroup, 4=AssignToWorkflowOwner.
-      // A Pending task that's actually Individual isn't available to "first
-      // available" the way a plain Pending task is, so the frontend needs
-      // to tell the two apart instead of showing both identically.
+      // WFlowTaskAssignmentTypeID: 1 = Individual (pre-assigned to one person;
+      // UserID is set before acceptance), 2 = FirstInGroup (normal Pending),
+      // 3 = AllInGroup, 4 = AssignToWorkflowOwner. The page shows a Pending
+      // Individual task as "Assigned" rather than open to the group.
       IsDirectAssignment: t.WFlowTaskAssignmentTypeID === 1,
       ReviewCycle: reviewCycle,
       Revision: thisRevision,
-      // Same review group, earlier review(s) for the same project - same
-      // revision's earlier cycles if any exist, else the previous revision's
-      // history - most recent (by revision, then cycle) first. UserName
-      // filled in once reviewer names are resolved, further down.
+      // Earlier completed reviews by the same group on the same project, most
+      // recent first. UserName is filled in after reviewer names are resolved.
       PreviousReviewers: priorReviews.map((e) => ({
         Revision: e.Revision, ReviewCycle: e.ReviewCycle, UserID: e.UserID, UserName: null, DateCompleted: e.DateCompleted
       }))
@@ -1542,43 +1086,35 @@ async function runCollector(opts = {}) {
   if (skippedUnresolved) log(`${skippedUnresolved} open task(s) skipped - instance unresolved.`);
   if (skippedNotActive) log(`${skippedNotActive} open task(s) skipped - parent workflow no longer Active.`);
 
-  // --- resolve reviewer names for Accepted/Completed tasks, directly-assigned
-  // Pending tasks, AND prior-cycle reviewers (cached) ---
-  const assignedUserIDs = new Set(
-    detailRows
-      .filter((r) => (r.TaskStatus === 'Accepted' || r.TaskStatus === 'Completed' || (r.TaskStatus === 'Pending' && r.IsDirectAssignment)) && r.UserID)
-      .map((r) => r.UserID)
-  );
+  // --- reviewer names (cached) ---
+  // For tasks with a named assignee (Accepted, Completed, or Pending with a
+  // direct assignment) and for every prior reviewer.
+  const hasNamedAssignee = (r) => r.TaskStatus === 'Accepted' || r.TaskStatus === 'Completed' || (r.TaskStatus === 'Pending' && r.IsDirectAssignment);
+  const assignedUserIDs = new Set(detailRows.filter((r) => hasNamedAssignee(r) && r.UserID).map((r) => r.UserID));
   const priorReviewerUserIDs = new Set();
   for (const r of detailRows) {
     for (const p of r.PreviousReviewers) { if (p.UserID) priorReviewerUserIDs.add(p.UserID); }
   }
   const allUserIDsToConsider = [...new Set([...assignedUserIDs, ...priorReviewerUserIDs])];
-  const usersToResolve = allUserIDsToConsider.filter((uid) => {
-    const entry = userCache[String(uid)];
-    if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return true;
-    return (now - new Date(entry.CachedAt).getTime()) / 60000 >= MAX_USER_CACHE_AGE_MIN;
-  });
+  const usersToResolve = allUserIDsToConsider.filter((uid) => !isFresh(userCache[String(uid)], MAX_USER_CACHE_AGE_MIN, now));
   log(`${allUserIDsToConsider.length} distinct reviewer(s) (current + prior cycles); ${usersToResolve.length} need a fresh lookup.`);
 
   let userResolvedCount = 0;
   await mapConcurrent(usersToResolve, CONCURRENCY, async (uid) => {
     try {
       const u = await getUser(sessionId, uid);
-      const name = u.FullName || `${u.FirstName || ''} ${u.LastName || ''}`.trim() || u.Email || null;
-      userCache[String(uid)] = { UserID: uid, Name: name, SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
+      userCache[String(uid)] = { UserID: uid, Name: userDisplayName(u), SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
     } catch (e) {
       log(`WARN GetUser(${uid}) failed: ${e.message}`);
     }
     userResolvedCount++;
-    if (userResolvedCount % 100 === 0) writeJson(USER_CACHE_JSON, userCache);
+    if (userResolvedCount % 100 === 0) writeJson(USER_CACHE_JSON, userCache); // checkpoint long cold runs
   });
   writeJson(USER_CACHE_JSON, userCache);
   log(`Reviewer name cache saved (${Object.keys(userCache).length} total entries).`);
 
   for (const row of detailRows) {
-    const isResolvableAssignment = row.TaskStatus === 'Accepted' || row.TaskStatus === 'Completed' || (row.TaskStatus === 'Pending' && row.IsDirectAssignment);
-    if (isResolvableAssignment && row.UserID && userCache[String(row.UserID)]) {
+    if (hasNamedAssignee(row) && row.UserID && userCache[String(row.UserID)]) {
       row.AssignedUserName = userCache[String(row.UserID)].Name;
     }
     for (const p of row.PreviousReviewers) {
@@ -1586,18 +1122,10 @@ async function runCollector(opts = {}) {
     }
   }
 
-  // Accumulates every Completed-today row this process has ever actually
-  // observed, across every refresh so far today, and resets at the Eastern
-  // day boundary. This exists because visibility of a just-closed
-  // instance's completed tasks isn't stable within a single day: a task can
-  // be found via the live tables right after it completes, then briefly
-  // disappear from BOTH the live tables (dropped the moment its instance
-  // closes) AND the Report* mirror (populated by what looks like a batch
-  // sync keyed off closure, which doesn't always keep up same-day) before
-  // showing up again later - or, in the worst case observed live
-  // (BP26-00006787), never reappear again before midnight at all. Once we've
-  // actually seen a completion, we don't need to see it again to keep
-  // reporting it for the rest of today.
+  // Same-day cache of every completed-today row seen by any refresh today
+  // (reset at the Eastern date change). A task whose instance just closed can
+  // drop out of live WFlowTasks before it reaches the Report* mirror; rows
+  // seen earlier today are added back so the count doesn't dip.
   let completedTodayCache = readJsonSafe(COMPLETED_TODAY_CACHE_JSON, {});
   if (completedTodayCache.date !== todayEastern || completedTodayCache.SchemaVersion !== CACHE_SCHEMA_VERSION) {
     completedTodayCache = { date: todayEastern, SchemaVersion: CACHE_SCHEMA_VERSION, entries: {} };
@@ -1614,11 +1142,8 @@ async function runCollector(opts = {}) {
     detailRows.push(cachedRow);
     rescuedFromCache++;
   }
-  if (rescuedFromCache) log(`${rescuedFromCache} completed-today task(s) no longer independently resolvable this run - restored from earlier today's cache.`);
+  if (rescuedFromCache) log(`${rescuedFromCache} completed-today task(s) not visible this run - restored from earlier today's cache.`);
   writeJson(COMPLETED_TODAY_CACHE_JSON, completedTodayCache);
-
-  writeCsv(DETAIL_CSV, detailRows);
-  log(`Detail CSV written (${detailRows.length} rows).`);
 
   // --- aggregate ---
   const groups = new Map(); // key: template::group
@@ -1649,12 +1174,11 @@ async function runCollector(opts = {}) {
       PreviousReviewers: r.PreviousReviewers
     });
   }
-  // Soonest due date first within each group (undated tasks sort last) - the
-  // most time-pressured items surface at the top of the detail list.
+  // Soonest due date first within each group; undated tasks last.
   const byDueDate = (a, b) => {
     const ad = a.DateDue ? new Date(a.DateDue).getTime() : Infinity;
     const bd = b.DateDue ? new Date(b.DateDue).getTime() : Infinity;
-    return ad - bd;
+    return ad === bd ? 0 : ad < bd ? -1 : 1; // plain subtraction gives NaN for two undated tasks
   };
   for (const g of groups.values()) g.Tasks.sort(byDueDate);
 
@@ -1662,29 +1186,21 @@ async function runCollector(opts = {}) {
     a.WorkflowTemplate.localeCompare(b.WorkflowTemplate) || a.GroupName.localeCompare(b.GroupName)
   );
 
-  // Completed-today breakdown, across every group, sliced three ways (by
-  // workflow, by group, by reviewer) so the dashboard can answer "who
-  // completed what today" without requiring someone to open each group one
-  // at a time. See createCompletedSummary() for the aggregation rules
-  // (Operations vs Reviews split, self-service exclusion, task-name
-  // normalization) - shared with the history view.
+  // Completed-today summary by workflow, group and reviewer (same
+  // aggregation as the history view; see createCompletedSummary).
   const todaySummaryAcc = createCompletedSummary();
   const seenCompletedIds = new Set();
   for (const r of detailRows) {
     if (r.TaskStatus !== 'Completed') continue;
     seenCompletedIds.add(String(r.WFlowTaskID));
-    if (SELF_SERVICE_GROUP_RE.test(r.GroupName || '')) continue;
+    if (SELF_SERVICE_GROUP_RE.test((r.GroupName || '').trim())) continue;
     todaySummaryAcc.add({ WorkflowTemplate: r.WorkflowTemplate, GroupName: r.GroupName, UserID: r.UserID, UserName: r.AssignedUserName, TaskName: r.TaskName });
   }
-  // Today's saved history file is a durable record of everything already
-  // seen completing today: rows are only ever ADDED to it, and unlike the
-  // same-day cache above it isn't tied to CACHE_SCHEMA_VERSION, so a version
-  // bump can't empty it. Anything in it that this run can't see and that
-  // cache didn't restore - e.g. the cache was just reset by a schema bump, or
-  // the report-tables fetch failed this run - is still counted, so Completed
-  // today (and Today vs Day for the same date) can only ever go UP during the
-  // day instead of dipping because of one degraded refresh. The day's file
-  // is only ever read here, not written (updateCompletedHistory does that).
+  // Rows in today's history file that this run didn't see are counted too.
+  // That file only gains rows and isn't reset by a CACHE_SCHEMA_VERSION bump,
+  // so the count can't drop after a degraded refresh (e.g. a failed
+  // report-tables fetch). It is only read here; updateCompletedHistory()
+  // writes it.
   let restoredFromHistory = 0;
   const todayHistory = readHistoryDay(todayEastern);
   if (todayHistory && Array.isArray(todayHistory.rows)) {
@@ -1705,9 +1221,7 @@ async function runCollector(opts = {}) {
   };
   writeJson(SNAPSHOT_JSON, snapshot, { compact: true });
 
-  // History is a bonus on top of the snapshot that's already been written -
-  // a failure here must never fail (or hide) a refresh whose main job
-  // succeeded.
+  // The snapshot is already written; a history failure is logged, not thrown.
   try {
     await updateCompletedHistory();
   } catch (e) {
@@ -1716,28 +1230,28 @@ async function runCollector(opts = {}) {
 
   // --- completed-task history --------------------------------------------
   //
-  // Writes today's completions to today's day file (adding to whatever is
-  // already there - a file only ever grows), re-derives the last couple of
-  // weeks from the live + Report tables (a just-closed workflow's tasks can
-  // lag into the Report mirror), and backfills a few older missing days per
-  // run toward HISTORY_DAYS. See the block comment above HISTORY_DIR for why
-  // this exists as files at all.
+  // Adds today's completions to today's day file, re-derives recent days from
+  // the live + Report tables (see HISTORY_RESETTLE_DAYS), and backfills a few
+  // missing older days per run toward HISTORY_DAYS.
   async function updateCompletedHistory() {
     const today = todayEastern;
     const nowMs = Date.now();
     const lookups = readJsonSafe(HISTORY_LOOKUPS_JSON, {});
     lookups.projects = lookups.projects || {};
-    lookups.failed = lookups.failed || { instances: {}, projects: {}, users: {} };
-    const NEG_TTL_MS = 24 * 3600 * 1000;
-    const recentlyFailed = (kind, id) => {
-      const at = lookups.failed[kind][String(id)];
-      return at && (nowMs - new Date(at).getTime()) < NEG_TTL_MS;
-    };
+    lookups.failed = lookups.failed || {};
+    for (const kind of ['instances', 'projects', 'users']) {
+      // Drop expired failure markers so the file doesn't grow without bound.
+      const kept = {};
+      for (const [id, at] of Object.entries(lookups.failed[kind] || {})) {
+        if (nowMs - new Date(at).getTime() < HISTORY_LOOKUP_RETRY_MS) kept[id] = at;
+      }
+      lookups.failed[kind] = kept;
+    }
+    const recentlyFailed = (kind, id) => Object.prototype.hasOwnProperty.call(lookups.failed[kind], String(id));
 
-    // Which past days to (re)derive from the live + Report tables this run.
-    // Skipped entirely when the Report tables couldn't be loaded - deriving a
-    // past day from the live table alone would write a file that's missing
-    // every closed workflow's tasks and then look "complete".
+    // Past days to (re)derive this run. Skipped when the Report tables aren't
+    // loaded: a past day derived from the live table alone would be missing
+    // every closed workflow's tasks but look complete.
     const haveDates = new Set(listHistoryDates());
     const derive = new Set();
     let reportEarliest = null;
@@ -1762,9 +1276,7 @@ async function runCollector(opts = {}) {
         if (ageHours >= HISTORY_RESETTLE_MIN_AGE_HOURS) derive.add(d);
       }
       if (HISTORY_FORCE_RESCHEMA) {
-        // Always logged (even when 0 need it, or 0 fit this run's budget) -
-        // silence here would be indistinguishable from the env var not
-        // actually reaching this process (e.g. a restart that didn't take).
+        // Always logged, so it's visible that the setting took effect.
         const needSchema = [...haveDates].filter((d) => !derive.has(d) && dayNeedsSchemaBackfill(d)).sort();
         const toDo = needSchema.slice(0, HISTORY_MAX_NEW_DAYS_PER_RUN);
         toDo.forEach((d) => derive.add(d));
@@ -1774,8 +1286,7 @@ async function runCollector(opts = {}) {
       log('History: HISTORY_FORCE_RESCHEMA is set, but the Report tables aren\'t loaded this run, so nothing can be re-derived (see the "Report tables" log line above for why).');
     }
 
-    // Candidate completed tasks (live table + Report mirror, deduped by task
-    // id) for every date being derived.
+    // Completed tasks on the days being derived, from both sources, deduped by task ID.
     const candidates = [];
     if (derive.size) {
       const seen = new Set();
@@ -1793,8 +1304,8 @@ async function runCollector(opts = {}) {
       for (const t of reportTasks) consider(t);
     }
 
-    // Instances: any cached entry works regardless of age - which project and
-    // workflow template an instance belongs to never changes.
+    // Any cached instance entry is usable regardless of age: an instance's
+    // project and workflow template never change.
     const instanceIds = [...new Set(candidates.map((t) => String(resolveInstanceID(t))))];
     const instancesToFetch = instanceIds.filter((id) => {
       const e = instanceCache[id];
@@ -1804,13 +1315,7 @@ async function runCollector(opts = {}) {
     let instanceCacheDirty = false;
     await mapConcurrent(instancesToFetch, CONCURRENCY, async (id) => {
       try {
-        const inst = await getWorkflowInstance(sessionId, id);
-        instanceCache[id] = {
-          WFlowInstanceID: inst.WFlowInstanceID, WFlowID: inst.WFlowID, EntityID: inst.EntityID,
-          WFlowInstanceStateID: inst.WFlowInstanceStateID, WFlowInstanceStateName: inst.WFlowInstanceStateName,
-          InstanceName: inst.InstanceName, Revision: parseRevision(inst.InstanceName), DateCompleted: inst.DateCompleted,
-          SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString()
-        };
+        instanceCache[id] = instanceCacheEntry(await getWorkflowInstance(sessionId, id));
         instanceCacheDirty = true;
       } catch (e) {
         lookups.failed.instances[id] = new Date().toISOString();
@@ -1829,8 +1334,8 @@ async function runCollector(opts = {}) {
       rowsByDate.get(d).push(row);
     };
 
-    // Today's completions come from the same detailRows the dashboard itself
-    // just used (including any rescued from the same-day accumulator cache).
+    // Today's completions: the same rows the snapshot used, including any
+    // restored from the same-day cache.
     for (const r of detailRows) {
       if (r.TaskStatus !== 'Completed') continue;
       const grp = (r.GroupName || '').trim();
@@ -1859,8 +1364,7 @@ async function runCollector(opts = {}) {
     await mapConcurrent(uidsToFetch, CONCURRENCY, async (uid) => {
       try {
         const u = await getUser(sessionId, uid);
-        const name = u.FullName || `${u.FirstName || ''} ${u.LastName || ''}`.trim() || u.Email || null;
-        userCache[uid] = { UserID: uid, Name: name, SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
+        userCache[uid] = { UserID: uid, Name: userDisplayName(u), SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
       } catch (e) {
         lookups.failed.users[uid] = new Date().toISOString();
         log(`WARN history: GetUser(${uid}) failed: ${e.message}`);
@@ -1884,16 +1388,15 @@ async function runCollector(opts = {}) {
     });
     for (const r of allRows) {
       if (r.proj || r.pid == null) continue;
-      const p = lookups.projects[String(r.pid)] || projectFallbackByID.get(String(r.pid));
+      const p = lookups.projects[String(r.pid)];
       if (p) { r.proj = p.Name || null; r.loc = r.loc || p.Location || null; r.desc = r.desc || p.Description || null; }
     }
     writeJson(HISTORY_LOOKUPS_JSON, lookups);
 
-    // Write each day: existing file rows + newly seen rows, keyed by task id
-    // so it only ever grows. A NEW past day that had tasks it couldn't
-    // resolve this run (an API hiccup) isn't written at all, so it stays
-    // "missing" and gets another try next run instead of being recorded as a
-    // finished-but-short day; re-derived days just add whatever they found.
+    // Each day file = existing rows + newly seen rows, keyed by task ID, so it
+    // only grows. A new past day with tasks that couldn't be resolved this run
+    // is not written, so it stays "missing" and is retried next run instead of
+    // being recorded short.
     let wroteDays = 0, wroteRows = 0, retryDays = 0;
     const datesToWrite = new Set([...rowsByDate.keys(), ...[...derive]]);
     for (const d of datesToWrite) {
@@ -1924,15 +1427,12 @@ async function runCollector(opts = {}) {
 }
 
 module.exports = {
-  runCollector, readHistoryRange, isValidDateStr, listDates, addDays, easternToday, listHistoryDates,
-  createCompletedSummary, HISTORY_MAX_RANGE_DAYS
+  runCollector, readHistoryRange, isValidDateStr, daysBetween, easternToday, HISTORY_MAX_RANGE_DAYS
 };
 
 if (require.main === module) {
   if (process.argv[2] === '--fetch-report-tables') {
-    // Internal mode: spawned by runReportTablesChildProcess() as its own
-    // process, specifically so its memory footprint is isolated from the
-    // main server. Not meant to be run manually, though it's harmless to.
+    // Internal mode used by runReportTablesChildProcess().
     fetchAndCacheReportTables()
       .then(() => process.exit(0))
       .catch((err) => {
@@ -1940,7 +1440,7 @@ if (require.main === module) {
         process.exit(1);
       });
   } else {
-    // Allow `node collector.js` standalone.
+    // Standalone run: `node collector.js`.
     runCollector({ log: console.log })
       .then(({ tookSeconds, snapshot }) => {
         console.log(`\n${snapshot.TotalOpenTasks} open tasks across ${snapshot.Groups.length} (template, group) combinations. Total: ${tookSeconds}s.`);

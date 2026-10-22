@@ -1,6 +1,6 @@
 {
   "name": "review-workload-dashboard",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "City of Pompano Beach Building Department - ProjectDox review workload dashboard",
   "main": "server.js",
