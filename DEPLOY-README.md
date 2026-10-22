@@ -52,9 +52,9 @@ configuration) or as machine-level variables:
 | `HISTORY_MAX_NEW_DAYS_PER_RUN` | No | See section 7 |
 | `HISTORY_FORCE_RESCHEMA` | No | See section 7 |
 
-Variables are read at process start; restart the service after changing them.
+Variables are read at process start; restart the app (service or scheduled task) after changing them.
 
-## 4. Run as a Windows service
+## 4. Keep the app running
 Before installing the service, run a quick manual check from the install
 folder:
 
@@ -85,6 +85,56 @@ Example with NSSM (run from an administrator prompt):
     nssm set ePlanDashboard AppRotateFiles 1
     nssm set ePlanDashboard AppRotateBytes 10485760
     nssm start ePlanDashboard
+
+### Alternative: Windows Task Scheduler (no extra software)
+If installing a service wrapper isn't allowed, a scheduled task can start the
+app at boot. Compared with a service it has no built-in log rotation, and
+environment variables must be set at machine level (Task Scheduler can't set
+them per task). Machine-level variables are readable by every account that
+can sign in to the server, so only use this on a server where that's
+acceptable.
+
+1. Set `PROJECTDOX_ADMIN_EMAIL`, `PROJECTDOX_ADMIN_PASSWORD` (and any optional
+   variables) as **System** environment variables.
+2. Create a `logs` folder in the install folder that the service account can
+   write to.
+3. Register the task from an administrator PowerShell prompt, replacing the
+   account name:
+
+```powershell
+$app = 'C:\Apps\ePlan-Dashboard'
+$action = New-ScheduledTaskAction -Execute 'cmd.exe' `
+  -Argument "/c `"`"C:\Program Files\nodejs\node.exe`" server.js >> logs\out.log 2>&1`"" `
+  -WorkingDirectory $app
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet `
+  -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName 'ePlanDashboard' -Action $action -Trigger $trigger `
+  -Settings $settings -User 'DOMAIN\svc-eplan' -Password (Read-Host 'Service account password') `
+  -RunLevel Limited
+Start-ScheduledTask -TaskName 'ePlanDashboard'
+```
+
+Notes:
+- `-ExecutionTimeLimit ([TimeSpan]::Zero)` is required. Task Scheduler's
+  default 3-day limit would otherwise stop the app.
+- The restart settings restart the app within a minute if it exits with an
+  error. Check that it's running with `Get-ScheduledTask ePlanDashboard`
+  (State should be `Running`).
+- To restart after changing a variable or upgrading, stop the task and make
+  sure the Node process has exited (stopping the task may not end it), then
+  start the task again:
+
+  ```powershell
+  Stop-ScheduledTask ePlanDashboard
+  Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object CommandLine -like '*server.js*' |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  Start-ScheduledTask ePlanDashboard
+  ```
+- `logs\out.log` grows without limit; clear or archive it periodically.
 
 ## 5. IIS reverse proxy
 1. Install the **URL Rewrite** and **Application Request Routing (ARR)**
@@ -154,17 +204,17 @@ Short-lived `*.tmp` files may appear during a refresh; they are renamed into
 place when complete.
 
 ## Upgrading
-1. Stop the service.
+1. Stop the app (service or scheduled task).
 2. Replace the four application files. Leave `data\` in place.
-3. Start the service.
+3. Start it again.
 
 The refresh log's first line shows the running version (from `package.json`).
 
 ## Troubleshooting
-- **Service won't start:** check the stderr log. Likely causes: a Node version
+- **App won't start:** check the stderr log (or `logsout.log` with Task Scheduler). Likely causes: a Node version
   older than 18, or the port already in use.
 - **Refresh fails:** the page shows only a generic message; the cause is in the
-  service's stderr log. Common causes: wrong or missing ProjectDox credentials,
+  stderr log (or `logsout.log`). Common causes: wrong or missing ProjectDox credentials,
   the API unreachable from this host or needing a proxy (step 1).
 - **Refresh ends with a timeout:** each API call has a time limit (1 minute for
   single lookups, 5-20 minutes for whole tables), and the historical-table
@@ -173,4 +223,4 @@ The refresh log's first line shows the running version (from `package.json`).
 - **"could not fetch/refresh report tables" warning in the log:** the historical-table download
   failed (often memory). The refresh continues using the previous download, if
   there is one.
-- **Changed a variable, nothing changed:** restart the service.
+- **Changed a variable, nothing changed:** restart the app.
