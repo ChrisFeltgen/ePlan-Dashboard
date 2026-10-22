@@ -35,8 +35,8 @@ const CACHE_SCHEMA_VERSION = 6;
 // Cache lifetimes, in minutes.
 const MAX_INSTANCE_CACHE_AGE_MIN = 120;
 const MAX_USER_CACHE_AGE_MIN = 1440;
-// Project Status changes during the day, so project entries expire quickly.
-const MAX_PROJECT_CACHE_AGE_MIN = 15;
+// Project number, description and location rarely change.
+const MAX_PROJECT_CACHE_AGE_MIN = 1440;
 // The set of instances belonging to a project's earlier revisions rarely changes.
 const MAX_REVISION_CACHE_AGE_MIN = 1440;
 // The Report* tables are an append-only historical mirror of several hundred
@@ -720,7 +720,7 @@ async function runCollector(opts = {}) {
   log(`${Object.keys(userCache).length} reviewer names loaded from cache`);
 
   const projectCache = readJsonSafe(PROJECT_CACHE_JSON, {});
-  log(`${Object.keys(projectCache).length} project name/status entries loaded from cache (TTL ${MAX_PROJECT_CACHE_AGE_MIN}m)`);
+  log(`${Object.keys(projectCache).length} project entries loaded from cache (TTL ${MAX_PROJECT_CACHE_AGE_MIN}m)`);
 
   log('Logging into ProjectDox...');
   const sessionId = await login();
@@ -876,7 +876,7 @@ async function runCollector(opts = {}) {
   writeJson(INSTANCE_CACHE_JSON, instanceCache);
   log(`Instance cache saved (${Object.keys(instanceCache).length} total entries).`);
 
-  // --- project name/status for projects with an Active instance (short-TTL cache) ---
+  // --- project number/description/location for projects with an Active instance (cached) ---
   const distinctProjectIDs = [...new Set(
     distinctInstanceIDs
       .map((id) => instanceCache[String(id)])
@@ -891,7 +891,7 @@ async function runCollector(opts = {}) {
   await mapConcurrent(projectsToResolve, CONCURRENCY, async (id) => {
     try {
       const p = await getProject(sessionId, id);
-      projectCache[String(id)] = { ProjectID: id, Name: p.Name, Status: p.Status, Description: p.Description, Location: p.Location, SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
+      projectCache[String(id)] = { ProjectID: id, Name: p.Name, Description: p.Description, Location: p.Location, SchemaVersion: CACHE_SCHEMA_VERSION, CachedAt: new Date().toISOString() };
     } catch (e) {
       log(`WARN GetProject(${id}) failed: ${e.message}`);
     }
@@ -1065,7 +1065,6 @@ async function runCollector(opts = {}) {
       WorkflowTemplate: templateName,
       ProjectID: inst.EntityID,
       ProjectName: proj ? proj.Name : null,
-      ProjectStatus: proj ? proj.Status : null,
       ProjectDescription: proj ? proj.Description : null,
       ProjectLocation: proj ? proj.Location : null,
       AssignedUserName: null,
