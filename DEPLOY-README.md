@@ -211,10 +211,10 @@ place when complete.
 The refresh log's first line shows the running version (from `package.json`).
 
 ## Troubleshooting
-- **App won't start:** check the stderr log (or `logsout.log` with Task Scheduler). Likely causes: a Node version
+- **App won't start:** check the stderr log (or `logs\out.log` with Task Scheduler). Likely causes: a Node version
   older than 18, or the port already in use.
 - **Refresh fails:** the page shows only a generic message; the cause is in the
-  stderr log (or `logsout.log`). Common causes: wrong or missing ProjectDox credentials,
+  stderr log (or `logs\out.log`). Common causes: wrong or missing ProjectDox credentials,
   the API unreachable from this host or needing a proxy (step 1).
 - **Refresh ends with a timeout:** each API call has a time limit (1 minute for
   single lookups, 5-20 minutes for whole tables), and the historical-table
