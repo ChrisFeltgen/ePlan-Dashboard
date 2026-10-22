@@ -32,13 +32,20 @@ const SNAPSHOT_JSON = path.join(DATA_DIR, 'workload-snapshot.json');
 // refetched with the new field instead of being reused until their TTL expires.
 const CACHE_SCHEMA_VERSION = 6;
 
-// Cache lifetimes, in minutes.
-const MAX_INSTANCE_CACHE_AGE_MIN = 120;
-const MAX_USER_CACHE_AGE_MIN = 1440;
-// Project number, description and location rarely change.
-const MAX_PROJECT_CACHE_AGE_MIN = 1440;
-// The set of instances belonging to a project's earlier revisions rarely changes.
-const MAX_REVISION_CACHE_AGE_MIN = 1440;
+// Cache lifetimes, in minutes. Each entry's actual lifetime is jittered
+// between 75% and 125% of these (see isFresh), so entries cached together on
+// a cold start don't all expire in the same refresh.
+//
+// Workflow instance: project, template and revision never change; the cached
+// state (Active or not) is re-checked at this interval.
+const MAX_INSTANCE_CACHE_AGE_MIN = 1440;
+// Reviewer names.
+const MAX_USER_CACHE_AGE_MIN = 7 * 1440;
+// Project number, description and location.
+const MAX_PROJECT_CACHE_AGE_MIN = 7 * 1440;
+// A project's list of revision instances. Also refetched as soon as a
+// revision appears that isn't in the cached list.
+const MAX_REVISION_CACHE_AGE_MIN = 30 * 1440;
 // The Report* tables are an append-only historical mirror of several hundred
 // thousand rows. A long TTL keeps most refreshes from re-downloading them; the
 // cost is that history for an instance closed within the TTL appears late.
@@ -84,9 +91,20 @@ function writeJson(filePath, obj, { compact = false } = {}) {
   writeFileAtomic(filePath, compact ? JSON.stringify(obj) : JSON.stringify(obj, null, 2));
 }
 
-function isFresh(entry, maxAgeMin, now) {
+// Stable value in [0, 1) derived from a cache key.
+function keyFraction(key) {
+  let h = 2166136261;
+  const str = String(key);
+  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+  return (h >>> 0) / 4294967296;
+}
+
+// True if a cache entry has the current schema and is younger than its
+// lifetime: maxAgeMin scaled by a per-key factor between 0.75 and 1.25.
+function isFresh(entry, maxAgeMin, now, key) {
   if (!entry || !entry.CachedAt || entry.SchemaVersion !== CACHE_SCHEMA_VERSION) return false;
-  return (now - new Date(entry.CachedAt).getTime()) / 60000 < maxAgeMin;
+  const lifetimeMin = maxAgeMin * (0.75 + 0.5 * keyFraction(key));
+  return (now - new Date(entry.CachedAt).getTime()) / 60000 < lifetimeMin;
 }
 
 async function mapConcurrent(items, limit, fn) {
@@ -720,7 +738,7 @@ async function runCollector(opts = {}) {
   log(`${Object.keys(userCache).length} reviewer names loaded from cache`);
 
   const projectCache = readJsonSafe(PROJECT_CACHE_JSON, {});
-  log(`${Object.keys(projectCache).length} project entries loaded from cache (TTL ${MAX_PROJECT_CACHE_AGE_MIN}m)`);
+  log(`${Object.keys(projectCache).length} project entries loaded from cache`);
 
   log('Logging into ProjectDox...');
   const sessionId = await login();
@@ -860,7 +878,7 @@ async function runCollector(opts = {}) {
   )];
   log(`${distinctInstanceIDs.length} distinct workflow instances referenced.`);
 
-  const toResolve = distinctInstanceIDs.filter((id) => !isFresh(instanceCache[String(id)], MAX_INSTANCE_CACHE_AGE_MIN, now));
+  const toResolve = distinctInstanceIDs.filter((id) => !isFresh(instanceCache[String(id)], MAX_INSTANCE_CACHE_AGE_MIN, now, id));
   log(`${toResolve.length} instance(s) need a fresh lookup (${distinctInstanceIDs.length - toResolve.length} from cache).`);
 
   let resolvedCount = 0;
@@ -884,8 +902,8 @@ async function runCollector(opts = {}) {
       .map((inst) => inst.EntityID)
       .filter((id) => id != null)
   )];
-  const projectsToResolve = distinctProjectIDs.filter((id) => !isFresh(projectCache[String(id)], MAX_PROJECT_CACHE_AGE_MIN, now));
-  log(`${distinctProjectIDs.length} distinct project(s) referenced; ${projectsToResolve.length} need a fresh lookup (TTL ${MAX_PROJECT_CACHE_AGE_MIN}m).`);
+  const projectsToResolve = distinctProjectIDs.filter((id) => !isFresh(projectCache[String(id)], MAX_PROJECT_CACHE_AGE_MIN, now, id));
+  log(`${distinctProjectIDs.length} distinct project(s) referenced; ${projectsToResolve.length} need a fresh lookup.`);
 
   let projectResolvedCount = 0;
   await mapConcurrent(projectsToResolve, CONCURRENCY, async (id) => {
@@ -906,19 +924,24 @@ async function runCollector(opts = {}) {
   // instance, so its prior reviewers are found in earlier revisions'
   // instances, listed by GetWorkflowInstancesByProjectName.
   const revisionInstancesCache = readJsonSafe(REVISION_INSTANCES_CACHE_JSON, {});
-  const projectsNeedingRevisionHistory = [...new Set(
-    openTasks
-      .map((t) => {
-        const wflowInstanceID = resolveInstanceID(t);
-        const inst = wflowInstanceID != null ? instanceCache[String(wflowInstanceID)] : null;
-        const thisCycleInfo = cycleInfo.get(String(t.WFlowReviewCycleID));
-        const reviewCycle = thisCycleInfo ? thisCycleInfo.ReviewCycle : null;
-        const needsIt = inst && inst.WFlowInstanceStateID === 1 && reviewCycle === 1 && (inst.Revision || 0) > 0;
-        return needsIt ? inst.EntityID : null;
-      })
-      .filter((id) => id != null)
-  )];
-  const revisionProjectsToResolve = projectsNeedingRevisionHistory.filter((id) => !isFresh(revisionInstancesCache[String(id)], MAX_REVISION_CACHE_AGE_MIN, now));
+  const revisionInstancesNeededByProject = new Map(); // ProjectID -> Set of instance IDs that need their earlier revisions
+  for (const t of openTasks) {
+    const wflowInstanceID = resolveInstanceID(t);
+    const inst = wflowInstanceID != null ? instanceCache[String(wflowInstanceID)] : null;
+    const thisCycleInfo = cycleInfo.get(String(t.WFlowReviewCycleID));
+    const reviewCycle = thisCycleInfo ? thisCycleInfo.ReviewCycle : null;
+    if (!inst || inst.EntityID == null || inst.WFlowInstanceStateID !== 1 || reviewCycle !== 1 || !((inst.Revision || 0) > 0)) continue;
+    if (!revisionInstancesNeededByProject.has(inst.EntityID)) revisionInstancesNeededByProject.set(inst.EntityID, new Set());
+    revisionInstancesNeededByProject.get(inst.EntityID).add(String(wflowInstanceID));
+  }
+  const projectsNeedingRevisionHistory = [...revisionInstancesNeededByProject.keys()];
+  // Refetch when the entry has expired or doesn't list the revision being reviewed.
+  const revisionProjectsToResolve = projectsNeedingRevisionHistory.filter((id) => {
+    const entry = revisionInstancesCache[String(id)];
+    if (!isFresh(entry, MAX_REVISION_CACHE_AGE_MIN, now, id)) return true;
+    const listed = new Set((entry.instances || []).map((i) => String(i.WFlowInstanceID)));
+    return [...revisionInstancesNeededByProject.get(id)].some((instId) => !listed.has(instId));
+  });
   log(`${projectsNeedingRevisionHistory.length} project(s) need cross-revision reviewer history; ${revisionProjectsToResolve.length} need a fresh lookup.`);
 
   let revisionResolvedCount = 0;
@@ -1095,7 +1118,7 @@ async function runCollector(opts = {}) {
     for (const p of r.PreviousReviewers) { if (p.UserID) priorReviewerUserIDs.add(p.UserID); }
   }
   const allUserIDsToConsider = [...new Set([...assignedUserIDs, ...priorReviewerUserIDs])];
-  const usersToResolve = allUserIDsToConsider.filter((uid) => !isFresh(userCache[String(uid)], MAX_USER_CACHE_AGE_MIN, now));
+  const usersToResolve = allUserIDsToConsider.filter((uid) => !isFresh(userCache[String(uid)], MAX_USER_CACHE_AGE_MIN, now, uid));
   log(`${allUserIDsToConsider.length} distinct reviewer(s) (current + prior cycles); ${usersToResolve.length} need a fresh lookup.`);
 
   let userResolvedCount = 0;
